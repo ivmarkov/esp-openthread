@@ -951,7 +951,6 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "esp-ieee802154",
- "heapless",
  "log",
  "openthread-sys",
  "rand_core",

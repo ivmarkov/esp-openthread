@@ -5,6 +5,7 @@
 
 use core::cell::{RefCell, RefMut};
 use core::ffi::c_void;
+use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::net::Ipv6Addr;
@@ -12,7 +13,6 @@ use core::pin::pin;
 use core::ptr::addr_of_mut;
 
 use embassy_futures::select::{Either, Either3};
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 
 use embassy_time::Instant;
 
@@ -25,6 +25,7 @@ use rand_core::RngCore;
 pub use dataset::*;
 pub use openthread_sys as sys;
 pub use radio::*;
+use signal::Signal;
 pub use udp::*;
 
 mod dataset;
@@ -34,6 +35,7 @@ pub mod enet;
 pub mod esp;
 mod platform;
 mod radio;
+mod signal;
 #[cfg(feature = "srp-client")]
 mod srp_client;
 mod udp;
@@ -85,6 +87,8 @@ macro_rules! ot {
     }};
 }
 
+pub(crate) use ot;
+
 /// An extension trait for converting a `Result<(), OtError>` to a raw `otError` OpenThread error code.
 pub trait IntoOtCode {
     /// Convert the `Result<(), OtError>` to a raw `otError` OpenThread error code.
@@ -100,49 +104,65 @@ impl IntoOtCode for Result<(), OtError> {
     }
 }
 
+/// A type representing one OpenThread instance.
 #[derive(Copy, Clone)]
-pub struct OpenThread<'a>(&'a OtState<'static>);
+pub struct OpenThread<'a> {
+    state: &'a RefCell<OtState<'static>>,
+    #[cfg(feature = "udp")]
+    udp_state: Option<&'a RefCell<OtUdpState<'static>>>,
+}
 
 impl<'a> OpenThread<'a> {
-    pub fn new<const N: usize>(
-        rng: &'a mut dyn RngCore,
-        resources: &'a mut OtResources<N>,
-    ) -> Result<Self, OtError> {
-        // Needed so that we convert from the the actual `'a` lifetime of `rng` to the fake `'static` lifetime in `OtResources`
-        #[allow(clippy::missing_transmute_annotations)]
-        let state = { &*resources.init(unsafe { core::mem::transmute(rng) })? };
-    
-        Ok(Self(state))
-    }
-
-    /// Create a new OpenThread controller and its associated components.
+    /// Create a new OpenThread instance.
     ///
     /// Arguments:
     /// - `rng`: A mutable reference to a random number generator that will be used by OpenThread.
     /// - `resources`: A mutable reference to the OpenThread resources.
     ///
     /// Returns:
-    /// - In case there were no errors related to initializing the OpenThread library, a tuple containing:
-    ///   - The OpenThread controller
-    ///   - The OpenThread Ipv6 packets receiver
-    ///   - The OpenThread Ipv6 packets transmitter
-    ///   - The OpenThread stack runner
-    pub fn split(self) -> (OtController<'a>, OtRx<'a>, OtTx<'a>, OtRunner<'a>) {
-        (
-            OtController(self),
-            OtRx(self),
-            OtTx(self),
-            OtRunner(self),
-        )
+    /// - In case there were no errors related to initializing the OpenThread library, the OpenThread instance.
+    pub fn new(rng: &'a mut dyn RngCore, resources: &'a mut OtResources) -> Result<Self, OtError> {
+        // Needed so that we convert from the the actual `'a` lifetime of `rng` to the fake `'static` lifetime in `OtResources`
+        #[allow(clippy::missing_transmute_annotations)]
+        let state = resources.init(unsafe { core::mem::transmute(rng) });
+
+        let mut this = Self {
+            state,
+            udp_state: None,
+        };
+
+        this.init()?;
+
+        Ok(this)
     }
 
-    pub fn split_borrow_mut(&mut self) -> (OtController<'_>, OtRx<'_>, OtTx<'_>, OtRunner<'_>) {
-        (
-            OtController(*self),
-            OtRx(*self),
-            OtTx(*self),
-            OtRunner(*self),
-        )
+    /// Create a new OpenThread instance with support for native OpenThread UDP sockets.
+    ///
+    /// Arguments:
+    /// - `rng`: A mutable reference to a random number generator that will be used by OpenThread.
+    /// - `resources`: A mutable reference to the OpenThread resources.
+    /// - `udp_resources`: A mutable reference to the OpenThread UDP resources.
+    ///
+    /// Returns:
+    /// - In case there were no errors related to initializing the OpenThread library, the OpenThread instance.
+    pub fn new_with_udp<const UDP_SOCKETS: usize, const UDP_RX_SZ: usize>(
+        rng: &'a mut dyn RngCore,
+        resources: &'a mut OtResources,
+        udp_resources: &'a mut OtUdpResources<UDP_SOCKETS, UDP_RX_SZ>,
+    ) -> Result<Self, OtError> {
+        // Needed so that we convert from the the actual `'a` lifetime of `rng` to the fake `'static` lifetime in `OtResources`
+        #[allow(clippy::missing_transmute_annotations)]
+        let state = resources.init(unsafe { core::mem::transmute(rng) });
+        let udp_state = udp_resources.init();
+
+        let mut this = Self {
+            state,
+            udp_state: Some(udp_state),
+        };
+
+        this.init()?;
+
+        Ok(this)
     }
 
     /// Set a new active dataset in the OpenThread stack.
@@ -153,11 +173,9 @@ impl<'a> OpenThread<'a> {
         let mut ot = self.activate();
         let state = ot.state();
 
-        dataset.store_raw(&mut state.data.dataset_resources.dataset);
+        dataset.store_raw(&mut state.ot.dataset_resources.dataset);
 
-        ot!(unsafe {
-            otDatasetSetActive(state.data.instance, &state.data.dataset_resources.dataset)
-        })
+        ot!(unsafe { otDatasetSetActive(state.ot.instance, &state.ot.dataset_resources.dataset) })
     }
 
     /// Brings the OpenThread IPv6 interface up or down.
@@ -165,7 +183,7 @@ impl<'a> OpenThread<'a> {
         let mut ot = self.activate();
         let state = ot.state();
 
-        ot!(unsafe { otIp6SetEnabled(state.data.instance, enable) })
+        ot!(unsafe { otIp6SetEnabled(state.ot.instance, enable) })
     }
 
     /// This function starts/stops the Thread protocol operation.
@@ -175,7 +193,7 @@ impl<'a> OpenThread<'a> {
         let mut ot = self.activate();
         let state = ot.state();
 
-        ot!(unsafe { otThreadSetEnabled(state.data.instance, enable) })
+        ot!(unsafe { otThreadSetEnabled(state.ot.instance, enable) })
     }
 
     /// Gets the list of IPv6 addresses currently assigned to the Thread interface
@@ -190,7 +208,7 @@ impl<'a> OpenThread<'a> {
         let mut ot = self.activate();
         let state = ot.state();
 
-        let mut addrs_ptr = unsafe { otIp6GetUnicastAddresses(state.data.instance) };
+        let mut addrs_ptr = unsafe { otIp6GetUnicastAddresses(state.ot.instance) };
 
         let mut offset = 0;
 
@@ -212,37 +230,50 @@ impl<'a> OpenThread<'a> {
     }
 
     /// Wait for the OpenThread stack to change its state.
+    ///
+    /// NOTE:
+    /// It is not advised to call this method concurrently from multiple async tasks
+    /// because it uses a single waker registration. Thus, while the method will not panic,
+    /// the tasks will fight with each other by each re-registering its own waker, thus keeping the CPU constantly busy.
     pub async fn wait_changed(&self) {
-        self.0.signals.controller.wait().await;
+        poll_fn(move |cx| self.activate().state().ot.changes.poll_wait(cx)).await;
     }
 
-    /// Run the OpenThread stack with the provided radio implementation.
+    /// Run the OpenThread stack with the provided radio implementation, by:
     ///
     /// Arguments:
     /// - `radio`: The radio to be used by the OpenThread stack.
+    ///
+    /// NOTE:
+    /// It is not advised to call this method concurrently from multiple async tasks
+    /// because it uses a single waker registration. Thus, while the method will not panic,
+    /// the tasks will fight with each other by each re-registering its own waker, thus keeping the CPU constantly busy.
     pub async fn run<R>(&self, radio: R) -> !
     where
         R: Radio,
     {
-        self.run_all(radio).await
+        let mut radio = pin!(self.run_radio(radio));
+        let mut alarm = pin!(self.run_alarm());
+        let mut openthread = pin!(self.run_tasklets());
+
+        let result =
+            embassy_futures::select::select3(&mut radio, &mut alarm, &mut openthread).await;
+
+        match result {
+            Either3::First(r) | Either3::Second(r) | Either3::Third(r) => r,
+        }
     }
 
     /// Wait for an IPv6 packet to be available.
+    ///
+    /// NOTE:
+    /// It is not advised to call this method concurrently from multiple async tasks
+    /// because it uses a single waker registration. Thus, while the method will not panic,
+    /// the tasks will fight with each other by each re-registering its own waker, thus keeping the CPU constantly busy.
     pub async fn wait_rx_available(&self) -> Result<(), OtError> {
-        loop {
-            trace!("Waiting for IPv6 packet reception availability");
+        trace!("Waiting for IPv6 packet reception availability");
 
-            {
-                let data = self.0.data.borrow_mut();
-
-                if !data.rcv_packet_ipv6.is_null() {
-                    trace!("IPv6 packet reception available");
-                    break;
-                }
-            }
-
-            self.0.signals.rx_ipv6.wait().await;
-        }
+        poll_fn(move |cx| self.activate().state().ot.rx_ipv6.poll_wait_triggered(cx)).await;
 
         Ok(())
     }
@@ -255,97 +286,74 @@ impl<'a> OpenThread<'a> {
     ///
     /// Returns:
     /// - The length of the received packet.
+    ///
+    /// NOTE:
+    /// It is not advised to call this method concurrently from multiple async tasks
+    /// because it uses a single waker registration. Thus, while the method will not panic,
+    /// the tasks will fight with each other by each re-registering its own waker, thus keeping the CPU constantly busy.
     pub async fn rx(&self, buf: &mut [u8]) -> Result<usize, OtError> {
-        loop {
-            trace!("Waiting for IPv6 packet reception");
-
-            {
-                let mut ot = self.activate();
-                let state = ot.state();
-
-                if !state.data.rcv_packet_ipv6.is_null() {
-                    let len = unsafe {
-                        otMessageRead(
-                            state.data.rcv_packet_ipv6,
-                            0,
-                            buf.as_mut_ptr() as *mut _,
-                            buf.len() as _,
-                        ) as _
-                    };
-
-                    unsafe {
-                        otMessageFree(state.data.rcv_packet_ipv6);
-                    }
-
-                    state.data.rcv_packet_ipv6 = core::ptr::null_mut();
-
-                    debug!("Received IPv6 packet: {:02x?}", &buf[..len]);
-
-                    return Ok(len);
-                }
-            }
-
-            self.0.signals.rx_ipv6.wait().await;
+        if buf.is_empty() {
+            return Ok(0);
         }
-    }
 
-    /// Wait for the OpenThread stack to be ready to receive a new IPv6 packet (i.e. to have space for the packet).
-    pub async fn wait_tx_available(&self) -> Result<(), OtError> {
-        // TODO
-        Ok(())
+        trace!("Waiting for IPv6 packet reception");
+
+        let msg = poll_fn(move |cx| self.activate().state().ot.rx_ipv6.poll_wait(cx)).await;
+
+        let _ = self.activate();
+
+        let len = unsafe { otMessageRead(msg, 0, buf.as_mut_ptr() as *mut _, buf.len() as _) as _ };
+
+        unsafe {
+            otMessageFree(msg);
+        }
+
+        debug!("Received IPv6 packet: {:02x?}", &buf[..len]);
+
+        Ok(len)
     }
 
     /// Transmit an IPv6 packet.
     ///
     /// Arguments:
     /// - `packet`: The packet to be transmitted.
-    pub async fn tx(&self, packet: &[u8]) -> Result<(), OtError> {
-        self.activate().tx_ip6(packet)?;
-
-        debug!("Transmitted IPv6 packet: {:02x?}", packet);
-
-        Ok(())
+    pub fn tx(&self, packet: &[u8]) -> Result<(), OtError> {
+        self.activate().tx_ip6(packet)
     }
 
-
     /// Initialize the OpenThread state, by:
-    /// - Ingesting the random number generator
     /// - Initializing the OpenThread C library (returning the OpenThread singleton) TBD: Support more than one OT instance in future
     /// - Setting the state change callback into the OpenThread C library
     /// - Setting the IPv6 receive callback into the OpenThread C library
     ///
     /// NOTE: This method assumes that tbe `OtState` contents is already initialized
     /// (i.e. all signals are in their initial values, and the data which represents OpenThread C types is all zeroed-out)
-    fn init(&mut self, rng: &'static mut dyn RngCore) -> Result<(), OtError> {
+    fn init(&mut self) -> Result<(), OtError> {
         {
             // TODO: Not ideal but we have to activate even before we have the instance
             // Reason: `otPlatEntropyGet` is called back
             let mut ot = self.activate();
             let state = ot.state();
 
-            state.data.rng = Some(rng);
-            state.data.instance = unsafe { otInstanceInitSingle() };
+            state.ot.instance = unsafe { otInstanceInitSingle() };
 
-            info!(
-                "OpenThread instance initialized at {:p}",
-                state.data.instance
-            );
+            info!("OpenThread instance initialized at {:p}", state.ot.instance);
 
             // TODO: Remove on drop
 
             ot!(unsafe {
                 otSetStateChangedCallback(
-                    state.data.instance,
+                    state.ot.instance,
                     Some(OtContext::plat_c_change_callback),
-                    state.data.instance as *mut _,
+                    state.ot.instance as *mut _,
                 )
             })?;
 
             unsafe {
                 otIp6SetReceiveCallback(
-                    state.data.instance,
+                    state.ot.instance,
                     Some(OtContext::plat_c_ip6_receive_callback),
-                    state.data.instance as *mut _,
+                    state.ot.instance as *mut _,
                 )
             }
         }
@@ -353,52 +361,45 @@ impl<'a> OpenThread<'a> {
         Ok(())
     }
 
-    /// Runs the OpenThread stack by:
-    /// - Spinning a Radio async loop that takes "TX" and "RX" commands and sends/receives IEEE 802.15.4 frames
-    /// - Spinning an Alarm async loop that notifies the OpenThread C library when an alarm is about to expire
-    /// - Spinning the OpenThread C library itself by calling all tasklets and notifying for alarms if necessary
-    async fn run_all<R>(&self, radio: R) -> !
-    where
-        R: Radio,
-    {
-        let mut radio = pin!(self.run_radio(radio));
-        let mut alarm = pin!(self.run_alarm());
-        let mut openthread = pin!(self.run_openthread());
-
-        let result =
-            embassy_futures::select::select3(&mut radio, &mut alarm, &mut openthread).await;
-
-        match result {
-            Either3::First(r) | Either3::Second(r) | Either3::Third(r) => r,
-        }
-    }
-
     /// An async loop that waits until the latest alarm (if any) expires and then notifies the OpenThread C library
     /// Based on `embassy-time` for simplicity and for achieving platform-neutrality.
     async fn run_alarm(&self) -> ! {
+        let alarm = || poll_fn(move |cx| self.activate().state().ot.alarm.poll_wait(cx));
+
         loop {
             trace!("Waiting for trigger alarm request");
 
-            let mut when = self.0.signals.alarm.wait().await;
+            let Some(mut when) = alarm().await else {
+                continue;
+            };
 
             debug!("Got trigger alarm request: {when}, waiting for it to trigger");
 
             loop {
-                let result = embassy_futures::select::select(
-                    self.0.signals.alarm.wait(),
-                    embassy_time::Timer::at(when),
-                )
-                .await;
+                let result =
+                    embassy_futures::select::select(alarm(), embassy_time::Timer::at(when)).await;
 
                 match result {
                     Either::First(new_when) => {
-                        debug!("Alarm interrupted by new alarm: {new_when}");
-                        when = new_when;
+                        if let Some(new_when) = new_when {
+                            debug!("Alarm interrupted by new alarm: {new_when}");
+                            when = new_when;
+                        } else {
+                            debug!("Alarm cancelled");
+                            break;
+                        }
                     }
                     Either::Second(_) => {
                         // TODO: Rather than signalling the OT spin loop, notify OT directly?
                         debug!("Alarm triggered, notifying OT main loop");
-                        self.0.signals.ot.signal(());
+
+                        {
+                            let mut ot = self.activate();
+                            let state = ot.state();
+
+                            unsafe { otPlatAlarmMilliFired(state.ot.instance) };
+                        }
+
                         break;
                     }
                 }
@@ -414,28 +415,22 @@ impl<'a> OpenThread<'a> {
     where
         R: Radio,
     {
+        let radio_cmd = || poll_fn(move |cx| self.activate().state().ot.radio.poll_wait(cx));
+
         loop {
             trace!("Waiting for radio command");
 
-            let mut cmd = self.0.signals.radio.wait().await;
+            let (mut cmd, mut conf) = radio_cmd().await;
             debug!("Got radio command: {cmd:?}");
-
-            let config = {
-                let mut ot = self.activate();
-                let state = ot.state();
-
-                state.data.radio_pending_conf.take()
-            };
-
-            if let Some(config) = config {
-                debug!("Setting radio config: {config:?}");
-                let _ = radio.set_config(&config).await;
-            }
 
             // TODO: Borrow it from the resources
             let mut psdu_buf = [0_u8; OT_RADIO_FRAME_MAX_SIZE as usize];
 
             loop {
+                // TODO: Only do this if the conf changed
+                debug!("Setting radio config: {conf:?}");
+                let _ = radio.set_config(&conf).await;
+
                 match cmd {
                     RadioCommand::Conf => break,
                     RadioCommand::Tx => {
@@ -443,14 +438,14 @@ impl<'a> OpenThread<'a> {
                             let mut ot = self.activate();
                             let state = ot.state();
 
-                            let psdu_len = state.data.radio_resources.snd_frame.mLength as usize;
+                            let psdu_len = state.ot.radio_resources.snd_frame.mLength as usize;
                             psdu_buf[..psdu_len]
-                                .copy_from_slice(&state.data.radio_resources.snd_psdu[..psdu_len]);
+                                .copy_from_slice(&state.ot.radio_resources.snd_psdu[..psdu_len]);
 
                             unsafe {
                                 otPlatRadioTxStarted(
-                                    state.data.instance,
-                                    &mut state.data.radio_resources.snd_frame,
+                                    state.ot.instance,
+                                    &mut state.ot.radio_resources.snd_frame,
                                 );
                             }
 
@@ -459,13 +454,13 @@ impl<'a> OpenThread<'a> {
 
                         trace!("About to Tx 802.15.4 frame {:02x?}", &psdu_buf[..psdu_len]);
 
-                        let mut new_cmd = pin!(self.0.signals.radio.wait());
+                        let mut new_cmd = pin!(radio_cmd());
                         let mut tx = pin!(radio.transmit(&psdu_buf[..psdu_len]));
 
                         let result = embassy_futures::select::select(&mut new_cmd, &mut tx).await;
 
                         match result {
-                            Either::First(new_cmd) => {
+                            Either::First((new_cmd, new_conf)) => {
                                 let mut ot = self.activate();
                                 let state = ot.state();
 
@@ -473,9 +468,9 @@ impl<'a> OpenThread<'a> {
                                 // by a new command
                                 unsafe {
                                     otPlatRadioTxDone(
-                                        state.data.instance,
-                                        &mut state.data.radio_resources.snd_frame,
-                                        &mut state.data.radio_resources.ack_frame,
+                                        state.ot.instance,
+                                        &mut state.ot.radio_resources.snd_frame,
+                                        &mut state.ot.radio_resources.ack_frame,
                                         otError_OT_ERROR_FAILED,
                                     );
                                 }
@@ -483,6 +478,7 @@ impl<'a> OpenThread<'a> {
                                 debug!("Tx interrupted by new command: {new_cmd:?}");
 
                                 cmd = new_cmd;
+                                conf = new_conf;
                             }
                             Either::Second(result) => {
                                 let mut ot = self.activate();
@@ -490,9 +486,9 @@ impl<'a> OpenThread<'a> {
 
                                 unsafe {
                                     otPlatRadioTxDone(
-                                        state.data.instance,
-                                        &mut state.data.radio_resources.snd_frame,
-                                        &mut state.data.radio_resources.ack_frame,
+                                        state.ot.instance,
+                                        &mut state.ot.radio_resources.snd_frame,
+                                        &mut state.ot.radio_resources.ack_frame,
                                         if result.is_ok() {
                                             otError_OT_ERROR_NONE
                                         } else {
@@ -511,14 +507,14 @@ impl<'a> OpenThread<'a> {
                         trace!("Waiting for Rx on channel {channel}");
 
                         let result = {
-                            let mut new_cmd = pin!(self.0.signals.radio.wait());
+                            let mut new_cmd = pin!(radio_cmd());
                             let mut rx = pin!(radio.receive(channel, &mut psdu_buf));
 
                             embassy_futures::select::select(&mut new_cmd, &mut rx).await
                         };
 
                         match result {
-                            Either::First(new_cmd) => {
+                            Either::First((new_cmd, new_conf)) => {
                                 let mut ot = self.activate();
                                 let state = ot.state();
 
@@ -526,8 +522,8 @@ impl<'a> OpenThread<'a> {
                                 // by a new command
                                 unsafe {
                                     otPlatRadioReceiveDone(
-                                        state.data.instance,
-                                        &mut state.data.radio_resources.rcv_frame,
+                                        state.ot.instance,
+                                        &mut state.ot.radio_resources.rcv_frame,
                                         otError_OT_ERROR_FAILED,
                                     );
                                 }
@@ -535,6 +531,7 @@ impl<'a> OpenThread<'a> {
                                 debug!("Rx interrupted by new command: {new_cmd:?}");
 
                                 cmd = new_cmd;
+                                conf = new_conf;
                             }
                             Either::Second(result) => {
                                 // https://github.com/espressif/esp-idf/blob/release/v5.3/components/ieee802154/private_include/esp_ieee802154_frame.h#L20
@@ -555,8 +552,8 @@ impl<'a> OpenThread<'a> {
                                     // Reporting receive failure because we got a driver error
                                     unsafe {
                                         otPlatRadioReceiveDone(
-                                            state.data.instance,
-                                            &mut state.data.radio_resources.rcv_frame,
+                                            state.ot.instance,
+                                            &mut state.ot.radio_resources.rcv_frame,
                                             otError_OT_ERROR_FAILED,
                                         );
                                     }
@@ -569,12 +566,12 @@ impl<'a> OpenThread<'a> {
                                     &psdu_buf[..psdu_meta.len]
                                 );
 
-                                state.data.radio_resources.rcv_psdu[..psdu_meta.len]
+                                state.ot.radio_resources.rcv_psdu[..psdu_meta.len]
                                     .copy_from_slice(&psdu_buf[..psdu_meta.len]);
 
-                                let instance = state.data.instance;
+                                let instance = state.ot.instance;
 
-                                let resources = &mut state.data.radio_resources;
+                                let resources = &mut state.ot.radio_resources;
                                 let rcv_psdu = &resources.rcv_psdu[..psdu_meta.len];
                                 let rcv_frame = &mut resources.rcv_frame;
 
@@ -633,7 +630,7 @@ impl<'a> OpenThread<'a> {
 
                                         unsafe {
                                             otPlatRadioEnergyScanDone(
-                                                state.data.instance,
+                                                state.ot.instance,
                                                 ENERGY_DETECT_RSS,
                                             );
                                         }
@@ -656,17 +653,15 @@ impl<'a> OpenThread<'a> {
         }
     }
 
-    /// Spins the OpenThread C library loop by processing tasklets (if they are pending), alarms (if they are pending)
-    /// or otherwise waiting until notified that there are either pending tasklets, or pending alarms.
-    async fn run_openthread(&self) -> ! {
+    /// Spins the OpenThread C library loop by processing tasklets if they are pending
+    /// or otherwise waiting until notified that there are pending tasklets
+    async fn run_tasklets(&self) -> ! {
         loop {
-            trace!("About to process Openthread tasklets and alarms");
+            trace!("About to process Openthread tasklets");
 
-            // Activate OpenThread and process any tasklets and alarms
-            self.activate().process();
+            self.activate().process_tasklets();
 
-            // Nothing to process anymore, wait until somebody signals us that there is stuff to process
-            self.0.signals.ot.wait().await;
+            poll_fn(move |cx| self.activate().state().ot.tasklets.poll_wait(cx)).await;
         }
     }
 
@@ -685,51 +680,7 @@ impl<'a> OpenThread<'a> {
     ///   This is necessary so that when an native OpenThread C API "ot*" function is called, OpenThread can call us "back" via the `otPlat*` API
     /// - While the returned `OpenThread` instance is in scope, the data of `OtState` stays mutably borrowed
     fn activate(&self) -> OtContext<'_> {
-        OtContext::activate_for(&self.0)
-    }
-}
-
-/// The OpenThread controller type
-///
-/// Provides facilities for controlling the OpenThread stack, like setting a new dataset, enabling/disabling the IPv6 interface, etc.
-pub struct OtController<'a>(OpenThread<'a>);
-
-impl OtController<'_> {
-    /// Set a new active dataset in the OpenThread stack.
-    ///
-    /// Arguments:
-    /// - `dataset`: A reference to the new dataset to be set.
-    pub fn set_dataset(&mut self, dataset: &OperationalDataset<'_>) -> Result<(), OtError> {
-        self.0.set_dataset(dataset)
-    }
-
-    /// Brings the OpenThread IPv6 interface up or down.
-    pub fn enable_ipv6(&mut self, enable: bool) -> Result<(), OtError> {
-        self.0.enable_ipv6(enable)
-    }
-
-    /// This function starts/stops the Thread protocol operation.
-    ///
-    /// TODO: The interface must be up when calling this function.
-    pub fn enable_thread(&mut self, enable: bool) -> Result<(), OtError> {
-        self.0.enable_thread(enable)
-    }
-
-    /// Gets the list of IPv6 addresses currently assigned to the Thread interface
-    ///
-    /// Arguments:
-    /// - `buf`: A mutable reference to a buffer where the IPv6 addresses will be stored.
-    ///
-    /// Returns:
-    /// - The total number of IPv6 addresses available. If this number is greater than
-    ///   the length of the buffer, only the first `buf.len()` addresses will be stored in the buffer.
-    pub fn ipv6_addrs(&mut self, buf: &mut [(Ipv6Addr, u8)]) -> Result<usize, OtError> {
-        self.0.ipv6_addrs(buf)
-    }
-
-    /// Wait for the OpenThread stack to change its state.
-    pub async fn wait_changed(&mut self) {
-        self.0.wait_changed().await
+        OtContext::activate_for(&self)
     }
 
     // #[cfg(feature = "srp-client")]
@@ -874,190 +825,94 @@ impl OtController<'_> {
     // }
 }
 
-/// A type that runs the OpenThread stack.
-///
-/// For the stack to operate, the user needs to constantly poll the future returned by this type.
-pub struct OtRunner<'a>(OpenThread<'a>);
-
-impl OtRunner<'_> {
-    /// Run the OpenThread stack with the provided radio implementation.
-    ///
-    /// Arguments:
-    /// - `radio`: The radio to be used by the OpenThread stack.
-    pub async fn run<R>(&mut self, radio: R) -> !
-    where
-        R: Radio,
-    {
-        self.0.run(radio).await
-    }
-}
-
-/// A type for receiving (egressing) IPv6 packets from the OpenThread stack and thus from the IEEE 802.15.4 network.
-pub struct OtRx<'a>(OpenThread<'a>);
-
-impl OtRx<'_> {
-    /// Wait for an IPv6 packet to be available.
-    pub async fn wait_available(&mut self) -> Result<(), OtError> {
-        self.0.wait_rx_available().await
-    }
-
-    /// Receive an IPv6 packet.
-    /// If there is no packet available, this function will async-wait until a packet is available.
-    ///
-    /// Arguments:
-    /// - `buf`: A mutable reference to a buffer where the received packet will be stored.
-    ///
-    /// Returns:
-    /// - The length of the received packet.
-    pub async fn rx(&mut self, buf: &mut [u8]) -> Result<usize, OtError> {
-        self.0.rx(buf).await
-    }
-}
-
-/// A type for transmitting (ingressing) IPv6 packets into the OpenThread stack and thus to the IEEE 802.15.4 network.
-pub struct OtTx<'a>(OpenThread<'a>);
-
-impl OtTx<'_> {
-    /// Wait for the OpenThread stack to be ready to receive a new IPv6 packet (i.e. to have space for the packet).
-    pub async fn wait_available(&mut self) -> Result<(), OtError> {
-        self.0.wait_tx_available().await
-    }
-
-    /// Transmit an IPv6 packet.
-    ///
-    /// Arguments:
-    /// - `packet`: The packet to be transmitted.
-    pub async fn tx(&mut self, packet: &[u8]) -> Result<(), OtError> {
-        self.0.tx(packet).await
-    }
-}
-
 /// The resources (data) that is necessary for the OpenThread stack to operate.
 ///
 /// A separate type so that it can be allocated outside of the OpenThread futures,
 /// thus avoiding expensive mem-moves.
 ///
 /// Can also be statically-allocated.
-pub struct OtResources<const N: usize> {
-    inner: MaybeUninit<OtResourcesInner<N>>,
+pub struct OtResources {
+    /// The radio resources.
+    radio_resources: MaybeUninit<RadioResources>,
+    /// The dataset resources.
+    dataset_resources: MaybeUninit<DatasetResources>,
+    /// The OpenThread state.
+    ///
+    /// This state borrows the radio and dataset resources thus
+    /// making this struct self-referencial.
+    /// This is not a problem because the `OpenThread` construction API is designed in such a way,
+    /// so that this self-referencial borrowing happens only while `OtResources` itself stays mutably
+    /// borrowed, while is the case until the `OpenThread` instance is dropped.
+    state: MaybeUninit<RefCell<OtState<'static>>>,
 }
 
-impl<const N: usize> OtResources<N> {
-    // TODO: Not ideal, as its content is not all-zeroes so it won't end up in the BSS segment
-    // Ideally we should initialize it piece by piece
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: OtResourcesInner<N> = OtResourcesInner::new();
-
+impl OtResources {
     /// Create a new `OtResources` instance.
     pub const fn new() -> Self {
         Self {
-            inner: MaybeUninit::uninit(),
+            radio_resources: MaybeUninit::uninit(),
+            dataset_resources: MaybeUninit::uninit(),
+            state: MaybeUninit::uninit(),
         }
     }
 
     /// Initialize the resouces, as they start their life as `MaybeUninit` so as to avoid mem-moves.
-    /// Also ingest the random number generator.
     ///
     /// Returns:
-    /// - A mutable reference to an `OtState` value that represents the initialized OpenThread state.
+    /// - A reference to a `RefCell<OtState>` value that represents the initialized OpenThread state.
     // TODO: Need to manually drop/reset the signals in OtSignals
-    fn init(&mut self, rng: &'static mut dyn RngCore) -> Result<&mut OtResourcesInner<N>, OtError> {
-        self.inner.write(Self::INIT);
+    fn init(&mut self, rng: &'static mut dyn RngCore) -> &RefCell<OtState<'static>> {
+        let radio_resources = unsafe { self.radio_resources.assume_init_mut() };
+        let dataset_resources = unsafe { self.dataset_resources.assume_init_mut() };
 
-        let inner = unsafe { self.inner.assume_init_mut() };
+        radio_resources.init();
 
-        inner.data.radio_resources.init();
-        inner.init(rng)?;
+        self.state.write(RefCell::new(unsafe {
+            core::mem::transmute(OtState {
+                rng: Some(rng),
+                radio_resources,
+                dataset_resources,
+                instance: core::ptr::null_mut(),
+                rx_ipv6: Signal::new(),
+                alarm: Signal::new(),
+                tasklets: Signal::new(),
+                changes: Signal::new(),
+                radio: Signal::new(),
+                radio_conf: Config::new(),
+            })
+        }));
 
         info!("OpenThread resources initialized");
 
-        Ok(inner)
+        unsafe { self.state.assume_init_mut() }
     }
 }
 
-impl<const N: usize> Default for OtResources<N> {
+impl Default for OtResources {
     fn default() -> Self {
         Self::new()
     }
 }
 
-struct OtResourcesInner<const N: usize> {
-    /// The signals that are used for communication between the controller, the runner and the OpenThread C library
-    signals: OtSignals,
-    /// Shared data between the above components
-    ///
-    /// It is stored as a `RefCell` because it needs to be shared between the controller, the runner and the OpenThread C library
-    /// Note that the futures generated by all of the above can only be polled from a single "thread" (i.e. they are not `Send`)
-    data: OtData,
-    udp_sockets_signals: [UdpSocketSignals; N],
-    udp_sockets_data: [UdpSocketData; N],
-}
-
-impl<const N: usize> OtResourcesInner<N> {
-    const INIT_UDP_SIGNALS: UdpSocketSignals = UdpSocketSignals::new();
-    const INIT_UDP_DATA: UdpSocketData = UdpSocketData::new();
-
-    const fn new() -> Self {
-        Self {
-            signals: OtSignals::new(),
-            data: OtData::new(),
-            udp_sockets_signals: [Self::INIT_UDP_SIGNALS; N],
-            udp_sockets_data: [Self::INIT_UDP_DATA; N],
-        }
-    }
-
-    fn init(&mut self, rng: &'static mut dyn RngCore) -> Result<(), OtError> {
-        self.data.init(rng)
-    }
-}
-
-/// The state of the OpenThread stack, from Rust POV.
-struct OtState<'t> {
-    /// The signals that are used for communication between the controller, the runner and the OpenThread C library
-    signals: &'t OtSignals,
-    /// Shared data between the above components
-    ///
-    /// It is stored as a `RefCell` because it needs to be shared between the controller, the runner and the OpenThread C library
-    /// Note that the futures generated by all of the above can only be polled from a single "thread" (i.e. they are not `Send`)
-    data: RefCell<&'t mut OtData>,
-    udp_sockets_signals: &'t [UdpSocketSignals],
-    udp_sockets_data: RefCell<&'t mut [UdpSocketData]>,
-}
-
-impl OtState<'static> {
-}
-
-impl<'t> OtState<'t> {
-    /// Create a new `OtState` instance.
-    const fn new<const N: usize>(resources: &'t mut OtResourcesInner<N>) -> Self {
-        Self {
-            signals: &resources.signals,
-            data: RefCell::new(&mut resources.data),
-            udp_sockets_signals: &resources.udp_sockets_signals,
-            udp_sockets_data: RefCell::new(&mut resources.udp_sockets_data),
-        }
-    }
-}
-
-/// Represents an "activated" `OtState`.
-/// An activated `OtState` is simply the same state but with all "data" mutably borrowed, for the duration
-/// of the activation.
+/// Represents an "activated" `OtState` and potentially an activated `OtUdpState`.
+///
+/// An activated `OtState`/`OtUdpState` is simply the same state but mutably borrowed,
+/// for the duration of the activation.
 struct OtActiveState<'a> {
-    signals: &'a OtSignals,
-    data: RefMut<'a, &'static mut OtData>,
-    udp_sockets_signals: &'a [UdpSocketSignals],
-    udp_sockets_data: RefMut<'a, &'static mut [UdpSocketData]>,
+    /// The activated `OtState` instance.
+    ot: RefMut<'a, OtState<'static>>,
+    /// The activated `OtUdpState` instance.
+    #[cfg(feature = "udp")]
+    udp: Option<RefMut<'a, OtUdpState<'static>>>,
 }
 
-impl<'a> OtActiveState<'a> {
-    /// Create a new `OtActiveState` instance from an `OtState` instance.
-    fn new(ot: &'a OtState<'static>) -> Self {
-        Self {
-            signals: &ot.signals,
-            data: ot.data.borrow_mut(),
-            udp_sockets_signals: &ot.udp_sockets_signals,
-            udp_sockets_data: ot.udp_sockets_data.borrow_mut(),
-        }
+impl OtActiveState<'_> {
+    /// A utility to get a reference to the UDP state
+    ///
+    /// This method will panic if the `OpenThread` instance was not
+    /// initialized with UDP resources.
+    pub(crate) fn udp(&mut self) -> &mut OtUdpState<'static> {
+        self.udp.as_mut().unwrap()
     }
 }
 
@@ -1066,9 +921,8 @@ impl<'a> OtActiveState<'a> {
 // always call us back from the thread on which we called it.
 unsafe impl Send for OtActiveState<'_> {}
 
-/// A thin wrapper around the OpenThread C library.
-///
-/// For the wrapper to operate, it needs to be activated by calling `activate_for`.
+/// Represents an activated `OpenThread` instance.
+/// See `OtContext::activate_for` for more information.
 struct OtContext<'a> {
     callback: bool,
     _t: PhantomData<&'a mut ()>,
@@ -1086,29 +940,35 @@ impl<'a> OtContext<'a> {
     /// are willing to operate on the same data, i.e.:
     /// - The radio async loop
     /// - The alarm async loop
-    /// - The `OpenThread::process` method (the entry into the C OpenThread library)
-    /// - The controller futures (which might call into OpenThread C by activating it shortly first)
+    /// - The tasklets processing async loop
+    /// - The RX, TX and other futures (which might call into OpenThread C by activating it shortly first)
     ///
-    /// All of the above tasks operate on the same data (OtData::data) by mutably borrowing it first, either
-    /// directly, or by activating (= creating an `OpenThread` type instance) and then calling an OpenThread C API.
+    /// All of the above tasks operate on the same data (`OtState` / `OtUdpState`) by mutably borrowing it first, either
+    /// directly, or by activating (= creating an `OtContext` type instance) and then calling an OpenThread C API.
     ///
-    /// Activation is automacally finished when the `OpenThread` instance is dropped.
+    /// Activation is automacally finished when the `OtContext` instance is dropped.
     ///
-    /// NOTE: Do NOT hold references to the `OpenThread` instance across `.await` points!
+    /// NOTE: Do NOT hold references to the `OtContext` instance across `.await` points!
     /// NOTE: Do NOT call `activate` twice without dropping the previous instance!
     ///
     /// The above ^^^ will not lead to a memory corruption, but the code will panic due to an attempt
     /// to mutably borrow the `OtState` `RefCell`d data twice.
-    fn activate_for(ot: &'a OtState<'static>) -> Self {
+    fn activate_for(ot: &'a OpenThread) -> Self {
         assert!(unsafe { OT_ACTIVE_STATE.0.get().as_mut() }
             .unwrap()
             .is_none());
+
+        let active = OtActiveState {
+            ot: ot.state.borrow_mut(),
+            #[cfg(feature = "udp")]
+            udp: ot.udp_state.map(|u| u.borrow_mut()),
+        };
 
         // Needed so that we convert from the fake `'static` lifetime in `OT_ACTIVE_STATE` to the actual `'a` lifetime of `ot`
         #[allow(clippy::missing_transmute_annotations)]
         {
             *unsafe { OT_ACTIVE_STATE.0.get().as_mut() }.unwrap() =
-                Some(unsafe { core::mem::transmute(OtActiveState::new(ot)) });
+                Some(unsafe { core::mem::transmute(active) });
         }
 
         Self {
@@ -1117,7 +977,7 @@ impl<'a> OtContext<'a> {
         }
     }
 
-    /// Obtain the already activated `OpenThread` instance when arriving
+    /// Obtain the already activated `OtContext` instance when arriving
     /// back from C into our code, via some of the `otPlat*` wrappers.
     ///
     /// This method is called when the OpenThread C library calls us back.
@@ -1132,7 +992,7 @@ impl<'a> OtContext<'a> {
         }
     }
 
-    /// Gets a reference to the `OtActiveState` instance owned by this `OpenThread` instance.
+    /// Gets a reference to the `OtActiveState` instance owned by this `OtContext` instance.
     fn state(&mut self) -> &mut OtActiveState<'a> {
         unsafe { core::mem::transmute(OT_ACTIVE_STATE.0.get().as_mut().unwrap().as_mut().unwrap()) }
     }
@@ -1143,7 +1003,7 @@ impl<'a> OtContext<'a> {
 
         let msg = unsafe {
             otIp6NewMessageFromBuffer(
-                state.data.instance,
+                state.ot.instance,
                 packet.as_ptr(),
                 packet.len() as _,
                 &otMessageSettings {
@@ -1154,7 +1014,9 @@ impl<'a> OtContext<'a> {
         };
 
         if !msg.is_null() {
-            let res = unsafe { otIp6Send(state.data.instance, msg) };
+            debug!("Transmitted IPv6 packet: {:02x?}", packet);
+
+            let res = unsafe { otIp6Send(state.ot.instance, msg) };
             if res != otError_OT_ERROR_DROP {
                 ot!(res)
             } else {
@@ -1168,58 +1030,9 @@ impl<'a> OtContext<'a> {
         }
     }
 
-    /// Processes the OpenThread stack by:
-    /// - Processing tasklets, if they are pending
-    /// - Processing alarms, if they are pending
-    fn process(&mut self) {
-        loop {
-            let mut processed = false;
-
-            processed |= self.process_tasklets();
-            processed |= self.process_alarm();
-
-            if !processed {
-                break;
-            }
-        }
-    }
-
     /// Process the tasklets if they are pending.
-    fn process_tasklets(&mut self) -> bool {
-        let state = self.state();
-
-        if state.data.run_tasklets {
-            debug!("Process tasklets");
-
-            state.data.run_tasklets = false;
-
-            unsafe { otTaskletsProcess(state.data.instance) };
-
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Process the alarm if it is pending.
-    fn process_alarm(&mut self) -> bool {
-        let state = self.state();
-
-        if state
-            .data
-            .alarm_status
-            .map(|when| when <= embassy_time::Instant::now())
-            .unwrap_or(false)
-        {
-            debug!("Alarm fired, notifying OpenThread C");
-
-            state.data.alarm_status = None;
-            unsafe { otPlatAlarmMilliFired(state.data.instance) };
-
-            true
-        } else {
-            false
-        }
+    fn process_tasklets(&mut self) {
+        unsafe { otTaskletsProcess(self.state().ot.instance) };
     }
 
     unsafe extern "C" fn plat_c_change_callback(flags: otChangedFlags, context: *mut c_void) {
@@ -1268,16 +1081,13 @@ impl<'a> OtContext<'a> {
     }
 
     fn plat_entropy_get(&mut self, buf: &mut [u8]) -> Result<(), OtError> {
-        self.state().data.rng.as_mut().unwrap().fill_bytes(buf);
+        self.state().ot.rng.as_mut().unwrap().fill_bytes(buf);
 
         Ok(())
     }
 
     fn plat_tasklets_signal_pending(&mut self) {
-        let state = self.state();
-
-        state.data.run_tasklets = true;
-        state.signals.ot.signal(());
+        self.state().ot.tasklets.signal(());
     }
 
     fn plat_ipv6_received(&mut self, msg: *mut otMessage) {
@@ -1285,19 +1095,18 @@ impl<'a> OtContext<'a> {
 
         let state = self.state();
 
-        if state.data.rcv_packet_ipv6.is_null() {
-            state.data.rcv_packet_ipv6 = msg;
-            state.signals.rx_ipv6.signal(());
-        } else {
+        if state.ot.rx_ipv6.signaled() {
             unsafe {
                 otMessageFree(msg);
             }
+        } else {
+            state.ot.rx_ipv6.signal(msg);
         }
     }
 
     fn plat_changed(&mut self, _flags: u32) {
         trace!("Plat changed callback");
-        self.state().signals.controller.signal(());
+        self.state().ot.changes.signal(());
     }
 
     fn plat_now(&mut self) -> u32 {
@@ -1308,20 +1117,17 @@ impl<'a> OtContext<'a> {
     fn plat_alarm_set(&mut self, at0_ms: u32, adt_ms: u32) -> Result<(), OtError> {
         trace!("Plat alarm set callback: {at0_ms}, {adt_ms}");
 
-        let state = self.state();
-
         let instant = embassy_time::Instant::from_millis(at0_ms as _)
             + embassy_time::Duration::from_millis(adt_ms as _);
 
-        state.data.alarm_status = Some(instant);
-        state.signals.alarm.signal(instant);
+        self.state().ot.alarm.signal(Some(instant));
 
         Ok(())
     }
 
     fn plat_alarm_clear(&mut self) -> Result<(), OtError> {
         trace!("Plat alarm clear callback");
-        self.state().data.alarm_status = None;
+        self.state().ot.alarm.signal(None);
 
         Ok(())
     }
@@ -1382,10 +1188,11 @@ impl<'a> OtContext<'a> {
 
         let state = self.state();
 
-        if state.data.radio_conf.promiscuous != promiscuous {
-            state.data.radio_conf.promiscuous = promiscuous;
-            state.data.radio_pending_conf = Some(state.data.radio_conf.clone());
-            state.signals.radio.signal(RadioCommand::Conf);
+        if state.ot.radio_conf.promiscuous != promiscuous {
+            state.ot.radio_conf.promiscuous = promiscuous;
+
+            let conf = state.ot.radio_conf.clone();
+            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1394,10 +1201,11 @@ impl<'a> OtContext<'a> {
 
         let state = self.state();
 
-        if state.data.radio_conf.ext_addr != Some(address) {
-            state.data.radio_conf.ext_addr = Some(address);
-            state.data.radio_pending_conf = Some(state.data.radio_conf.clone());
-            state.signals.radio.signal(RadioCommand::Conf);
+        if state.ot.radio_conf.ext_addr != Some(address) {
+            state.ot.radio_conf.ext_addr = Some(address);
+
+            let conf = state.ot.radio_conf.clone();
+            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1406,10 +1214,11 @@ impl<'a> OtContext<'a> {
 
         let state = self.state();
 
-        if state.data.radio_conf.short_addr != Some(address) {
-            state.data.radio_conf.short_addr = Some(address);
-            state.data.radio_pending_conf = Some(state.data.radio_conf.clone());
-            state.signals.radio.signal(RadioCommand::Conf);
+        if state.ot.radio_conf.short_addr != Some(address) {
+            state.ot.radio_conf.short_addr = Some(address);
+
+            let conf = state.ot.radio_conf.clone();
+            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1418,10 +1227,11 @@ impl<'a> OtContext<'a> {
 
         let state = self.state();
 
-        if state.data.radio_conf.pan_id != Some(pan_id) {
-            state.data.radio_conf.pan_id = Some(pan_id);
-            state.data.radio_pending_conf = Some(state.data.radio_conf.clone());
-            state.signals.radio.signal(RadioCommand::Conf);
+        if state.ot.radio_conf.pan_id != Some(pan_id) {
+            state.ot.radio_conf.pan_id = Some(pan_id);
+
+            let conf = state.ot.radio_conf.clone();
+            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1438,7 +1248,7 @@ impl<'a> OtContext<'a> {
     fn plat_radio_transmit_buffer(&mut self) -> *mut otRadioFrame {
         trace!("Plat radio transmit buffer callback");
         // TODO: This frame is private to us, perhaps don't store it in a RefCell?
-        &mut self.state().data.radio_resources.tns_frame
+        &mut self.state().ot.radio_resources.tns_frame
     }
 
     fn plat_radio_transmit(&mut self, frame: &otRadioFrame) -> Result<(), OtError> {
@@ -1452,19 +1262,24 @@ impl<'a> OtContext<'a> {
 
         let psdu = unsafe { core::slice::from_raw_parts_mut(frame.mPsdu, frame.mLength as _) };
 
-        state.data.radio_resources.snd_frame = *frame;
-        state.data.radio_resources.snd_psdu[..psdu.len()].copy_from_slice(psdu);
-        state.data.radio_resources.snd_frame.mPsdu =
-            addr_of_mut!(state.data.radio_resources.snd_psdu) as *mut _;
+        state.ot.radio_resources.snd_frame = *frame;
+        state.ot.radio_resources.snd_psdu[..psdu.len()].copy_from_slice(psdu);
+        state.ot.radio_resources.snd_frame.mPsdu =
+            addr_of_mut!(state.ot.radio_resources.snd_psdu) as *mut _;
 
-        state.signals.radio.signal(RadioCommand::Tx);
+        let conf = state.ot.radio_conf.clone();
+        state.ot.radio.signal((RadioCommand::Tx, conf));
 
         Ok(())
     }
 
     fn plat_radio_receive(&mut self, channel: u8) -> Result<(), OtError> {
         trace!("Plat radio receive callback, channel: {channel}");
-        self.state().signals.radio.signal(RadioCommand::Rx(channel));
+
+        let state = self.state();
+
+        let conf = state.ot.radio_conf.clone();
+        state.ot.radio.signal((RadioCommand::Tx, conf));
 
         Ok(())
     }
@@ -1482,13 +1297,11 @@ impl Drop for OtContext<'_> {
     }
 }
 
-/// The "data-carrier" (mostly buffers) portion of the `OtState` type.
+/// The OpenThread state from Rust POV.
 ///
 /// This data lives behind a `RefCell` and is mutably borrowed each time
-/// the OpenThread stack is activated, by creating an `OpenThread` instance.
-///
-/// It contains mostly native Openthread C data types.
-struct OtData {
+/// the OpenThread stack is activated, by creating an `OtContext` instance.
+struct OtState<'a> {
     /// The OpenThread instance associated with the `OtData` inztance.
     instance: *mut otInstance,
     /// The random number generator associated with the `OtData` instance.
@@ -1496,64 +1309,18 @@ struct OtData {
     /// If not null, an Ipv6 packet egressed from OpenThread and waiting (via `OtRx`) to be ingressed somewhere else
     /// To be used together with `OtSignals::rx_ipv6`
     /// TODO: Maybe unite the two?
-    rcv_packet_ipv6: *mut otMessage,
-    /// Resources for the radio (PHY data frames and their descriptors)
-    radio_resources: RadioResources,
-    /// Resouces for dealing with the operational dataset
-    dataset_resources: DatasetResources,
+    rx_ipv6: Signal<*mut otMessage>,
     /// `Some` in case there is a pending OpenThread awarm which is not due yet
-    alarm_status: Option<embassy_time::Instant>,
+    alarm: Signal<Option<embassy_time::Instant>>,
     /// If `true`, the tasklets need to be run. Set by the OpenThread C library via the `otPlatTaskletsSignalPending` callback
-    run_tasklets: bool,
+    tasklets: Signal<()>,
+    changes: Signal<()>,
+    radio: Signal<(RadioCommand, radio::Config)>,
     radio_conf: radio::Config,
-    radio_pending_conf: Option<radio::Config>,
-}
-
-impl OtData {
-    /// Create a new `OtData` instance.
-    const fn new() -> Self {
-        Self {
-            instance: core::ptr::null_mut(),
-            rng: None,
-            rcv_packet_ipv6: core::ptr::null_mut(),
-            radio_resources: RadioResources::new(),
-            dataset_resources: DatasetResources::new(),
-            alarm_status: None,
-            run_tasklets: true,
-            radio_conf: radio::Config::new(),
-            radio_pending_conf: None,
-        }
-    }
-}
-
-/// The "signals" portion of the `OtState` type.
-///
-/// This state does not have to be mutably borrowed, as it has
-/// interior mutability.
-struct OtSignals {
-    /// A signal for the latest command that the radio runner needs to process
-    radio: Signal<NoopRawMutex, RadioCommand>,
-    /// A signal for the latest alarm that the alarm runner needs to await to become due
-    alarm: Signal<NoopRawMutex, embassy_time::Instant>,
-    /// A signal for `OtController` that something had changed in the OpenThread stack (method `OtController::wait_changed`)
-    controller: Signal<NoopRawMutex, ()>,
-    /// A singal for `OpenThread` / `OtState` that it needs to call its `process` loop
-    ot: Signal<NoopRawMutex, ()>,
-    /// A signal for `OtRx` that an IPv6 packet is incoming from OpenThread
-    rx_ipv6: Signal<NoopRawMutex, ()>,
-}
-
-impl OtSignals {
-    /// Create a new `OtSignals` instance.
-    const fn new() -> Self {
-        Self {
-            radio: Signal::new(),
-            alarm: Signal::new(),
-            controller: Signal::new(),
-            ot: Signal::new(),
-            rx_ipv6: Signal::new(),
-        }
-    }
+    /// Resources for the radio (PHY data frames and their descriptors)
+    radio_resources: &'a mut RadioResources,
+    /// Resouces for dealing with the operational dataset
+    dataset_resources: &'a mut DatasetResources,
 }
 
 /// A command for the radio runner to process.
@@ -1581,10 +1348,9 @@ enum RadioCommand {
 /// the user can abuse. With that said, care should be taken the self-referencial struct to be properly initialized,
 /// before using it and members of the struct should not be swapped-out after that.
 ///
-/// With that said, the structure anyway cannot be moved omnce we hit the `openthread::new` function in this crate,
-/// because of the signature of the `openthread::new` API which **mutably borrows** `OtResources` (and tus this structure too)
-/// for the lifetime of the OpenThread Rust stack.
-// TODO: Figure out how to init efficiently
+/// With that said, the structure anyway cannot be moved once we hit the `OpenThread::new*` functions in this crate,
+/// because of the signature of the `OpenThread::new*` APIs which **mutably borrow** `OtResources` (and thus this structure too)
+/// for the lifetime of the `OpenThread` Rust stack.
 struct RadioResources {
     /// The received frame from the radio
     rcv_frame: otRadioFrame,
@@ -1621,7 +1387,7 @@ impl RadioResources {
 
     /// Initialize the `RadioResources` instance by doing the self-referential magic.
     ///
-    /// For this to work, `init` should be called from inside the `openthread::new` API method that creates
+    /// For this to work, `init` should be called from inside the `Openthread::new*` API methods that create
     /// all of the public-facing APIs, as at that time `OtResources` is already mutably borrowed and cannot move.
     ///
     /// This method should not be called e.g. from the constructor of `OtResources`, as the value can move once
