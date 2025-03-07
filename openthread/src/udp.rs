@@ -13,7 +13,7 @@ use crate::sys::{
     otMessageRead, otNetifIdentifier_OT_NETIF_THREAD, otSockAddr, otUdpBind, otUdpClose,
     otUdpConnect, otUdpNewMessage, otUdpOpen, otUdpSend, otUdpSocket,
 };
-use crate::{ot, OpenThread, OtContext, OtError};
+use crate::{ot, to_ot_addr, to_sock_addr, OpenThread, OtContext, OtError};
 
 /// An OpenThread native UDP socket
 pub struct UdpSocket<'a> {
@@ -247,7 +247,7 @@ impl Drop for UdpSocket<'_> {
         let instance = ot.state().ot.instance;
         let udp = ot.state().udp();
 
-        ot!(unsafe { otUdpClose(instance, &mut udp.sockets[self.slot].ot_socket,) }).unwrap();
+        ot!(unsafe { otUdpClose(instance, &mut udp.sockets[self.slot].ot_socket) }).unwrap();
 
         udp.sockets[self.slot].taken = false;
     }
@@ -368,22 +368,5 @@ impl UdpSocketCtx {
             },
             rx_peer: Signal::new(),
         }
-    }
-}
-
-/// Convert an `otIp6Address`, port and network interface ID to a `SocketAddrV6`.
-fn to_sock_addr(addr: &otIp6Address, port: u16, netif: u32) -> SocketAddrV6 {
-    SocketAddrV6::new(Ipv6Addr::from(unsafe { addr.mFields.m8 }), port, 0, netif)
-}
-
-/// Convert a `SocketAddrV6` to an `otSockAddr`.
-fn to_ot_addr(addr: &SocketAddrV6) -> otSockAddr {
-    otSockAddr {
-        mAddress: otIp6Address {
-            mFields: otIp6Address__bindgen_ty_1 {
-                m8: addr.ip().octets(),
-            },
-        },
-        mPort: addr.port(),
     }
 }

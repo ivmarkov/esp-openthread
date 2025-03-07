@@ -8,7 +8,7 @@ use core::ffi::c_void;
 use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::net::Ipv6Addr;
+use core::net::{Ipv6Addr, SocketAddrV6};
 use core::pin::pin;
 use core::ptr::addr_of_mut;
 
@@ -18,14 +18,18 @@ use embassy_time::Instant;
 
 use log::{debug, info, trace, warn};
 
+use openthread_sys::{otIp6Address, otSockAddr};
 use platform::OT_ACTIVE_STATE;
 
 use rand_core::RngCore;
 
+use signal::Signal;
+
 pub use dataset::*;
 pub use openthread_sys as sys;
 pub use radio::*;
-use signal::Signal;
+#[cfg(feature = "srp")]
+pub use srp::*;
 #[cfg(feature = "udp")]
 pub use udp::*;
 
@@ -37,8 +41,8 @@ pub mod esp;
 mod platform;
 mod radio;
 mod signal;
-#[cfg(feature = "srp-client")]
-mod srp_client;
+#[cfg(feature = "srp")]
+mod srp;
 #[cfg(feature = "udp")]
 mod udp;
 
@@ -112,6 +116,8 @@ pub struct OpenThread<'a> {
     state: &'a RefCell<OtState<'static>>,
     #[cfg(feature = "udp")]
     udp_state: Option<&'a RefCell<OtUdpState<'static>>>,
+    #[cfg(feature = "srp")]
+    srp_state: Option<&'a RefCell<OtSrpState<'static>>>,
 }
 
 impl<'a> OpenThread<'a> {
@@ -132,6 +138,8 @@ impl<'a> OpenThread<'a> {
             state,
             #[cfg(feature = "udp")]
             udp_state: None,
+            #[cfg(feature = "srp")]
+            srp_state: None,
         };
 
         this.init()?;
@@ -162,6 +170,60 @@ impl<'a> OpenThread<'a> {
         let mut this = Self {
             state,
             udp_state: Some(udp_state),
+            #[cfg(feature = "srp")]
+            srp_state: None,
+        };
+
+        this.init()?;
+
+        Ok(this)
+    }
+
+    #[cfg(feature = "srp")]
+    pub fn new_with_srp<const SRP_SVCS: usize, const SRP_BUF_SZ: usize>(
+        rng: &'a mut dyn RngCore,
+        resources: &'a mut OtResources,
+        srp_resources: &'a mut OtSrpResources<SRP_SVCS, SRP_BUF_SZ>,
+    ) -> Result<Self, OtError> {
+        // Needed so that we convert from the the actual `'a` lifetime of `rng` to the fake `'static` lifetime in `OtResources`
+        #[allow(clippy::missing_transmute_annotations)]
+        let state = resources.init(unsafe { core::mem::transmute(rng) });
+        let srp_state = srp_resources.init();
+
+        let mut this = Self {
+            state,
+            #[cfg(feature = "udp")]
+            udp_state: None,
+            srp_state: Some(srp_state),
+        };
+
+        this.init()?;
+
+        Ok(this)
+    }
+
+    #[cfg(all(feature = "udp", feature = "srp"))]
+    pub fn new_with_udp_srp<
+        const UDP_SOCKETS: usize,
+        const UDP_RX_SZ: usize,
+        const SRP_SVCS: usize,
+        const SRP_BUF_SZ: usize,
+    >(
+        rng: &'a mut dyn RngCore,
+        resources: &'a mut OtResources,
+        udp_resources: &'a mut OtUdpResources<UDP_SOCKETS, UDP_RX_SZ>,
+        srp_resources: &'a mut OtSrpResources<SRP_SVCS, SRP_BUF_SZ>,
+    ) -> Result<Self, OtError> {
+        // Needed so that we convert from the the actual `'a` lifetime of `rng` to the fake `'static` lifetime in `OtResources`
+        #[allow(clippy::missing_transmute_annotations)]
+        let state = resources.init(unsafe { core::mem::transmute(rng) });
+        let udp_state = udp_resources.init();
+        let srp_state = srp_resources.init();
+
+        let mut this = Self {
+            state,
+            udp_state: Some(udp_state),
+            srp_state: Some(srp_state),
         };
 
         this.init()?;
@@ -686,147 +748,6 @@ impl<'a> OpenThread<'a> {
     fn activate(&self) -> OtContext<'_> {
         OtContext::activate_for(self)
     }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn setup_srp_client_autostart(
-    //     &mut self,
-    //     callback: Option<
-    //         unsafe extern "C" fn(aServerSockAddr: *const otSockAddr, aContext: *mut c_void),
-    //     >,
-    // ) -> Result<(), Error> {
-    //     if !callback.is_some() {
-    //         srp_client::enable_srp_autostart(self.instance);
-    //         return Ok(());
-    //     }
-    //     srp_client::enable_srp_autostart_with_callback_and_context(
-    //         self.instance,
-    //         callback,
-    //         core::ptr::null_mut(),
-    //     );
-
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn setup_srp_client_host_addr_autoconfig(&mut self) -> Result<(), Error> {
-    //     srp_client::set_srp_client_host_addresses_auto_config(self.instance)?;
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn setup_srp_client_set_hostname(&mut self, host_name: &str) -> Result<(), Error> {
-    //     srp_client::set_srp_client_host_name(self.instance, host_name.as_ptr() as _)?;
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn setup_srp_client_with_addr(
-    //     &mut self,
-    //     host_name: &str,
-    //     addr: otSockAddr,
-    // ) -> Result<(), Error> {
-    //     srp_client::set_srp_client_host_name(self.instance, host_name.as_ptr() as _)?;
-    //     srp_client::srp_client_start(self.instance, addr)?;
-    //     Ok(())
-    // }
-
-    // // For now, txt entries are expected to be provided as hex strings to avoid having to pull in the hex crate
-    // // for example a key entry of 'abc' should be provided as '03616263'
-    // #[cfg(feature = "srp-client")]
-    // pub fn register_service_with_srp_client(
-    //     &mut self,
-    //     instance_name: &str,
-    //     service_name: &str,
-    //     service_labels: &[&str],
-    //     txt_entry: &str,
-    //     port: u16,
-    //     priority: Option<u16>,
-    //     weight: Option<u16>,
-    //     lease: Option<u32>,
-    //     key_lease: Option<u32>,
-    // ) -> Result<(), Error> {
-    //     if !srp_client::is_srp_client_running(self.instance) {
-    //         self.setup_srp_client_autostart(None)?;
-    //     }
-
-    //     srp_client::add_srp_client_service(
-    //         self.instance,
-    //         instance_name.as_ptr() as _,
-    //         instance_name.len() as _,
-    //         service_name.as_ptr() as _,
-    //         service_name.len() as _,
-    //         service_labels,
-    //         txt_entry.as_ptr() as _,
-    //         txt_entry.len() as _,
-    //         port,
-    //         priority,
-    //         weight,
-    //         lease,
-    //         key_lease,
-    //     )?;
-
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn set_srp_client_ttl(&mut self, ttl: u32) {
-    //     srp_client::set_srp_client_ttl(self.instance, ttl);
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn get_srp_client_ttl(&mut self) -> u32 {
-    //     srp_client::get_srp_client_ttl(self.instance)
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn stop_srp_client(&mut self) -> Result<(), Error> {
-    //     srp_client::srp_client_stop(self.instance);
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn get_srp_client_state(&mut self) -> Result<Option<SrpClientItemState>, Error> {
-    //     Ok(srp_client::get_srp_client_host_state(self.instance))
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn clear_srp_client_host_buffers(&mut self) {
-    //     srp_client::srp_clear_all_client_services(self.instance)
-    // }
-
-    // /// If there are any services already registered, unregister them
-    // #[cfg(feature = "srp-client")]
-    // pub fn srp_unregister_all_services(
-    //     &mut self,
-    //     remove_keylease: bool,
-    //     send_update: bool,
-    // ) -> Result<(), Error> {
-    //     srp_client::srp_unregister_and_remove_all_client_services(
-    //         self.instance,
-    //         remove_keylease,
-    //         send_update,
-    //     )?;
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn srp_clear_service(&mut self, service: SrpClientService) -> Result<(), Error> {
-    //     srp_client::srp_clear_service(self.instance, service)?;
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn srp_unregister_service(&mut self, service: SrpClientService) -> Result<(), Error> {
-    //     srp_client::srp_unregister_service(self.instance, service)?;
-    //     Ok(())
-    // }
-
-    // #[cfg(feature = "srp-client")]
-    // pub fn srp_get_services(
-    //     &mut self,
-    // ) -> heapless::Vec<SrpClientService, { srp_client::MAX_SERVICES }> {
-    //     srp_client::get_srp_client_services(self.instance)
-    // }
 }
 
 /// The resources (data) that is necessary for the OpenThread stack to operate.
@@ -908,6 +829,8 @@ struct OtActiveState<'a> {
     /// The activated `OtUdpState` instance.
     #[cfg(feature = "udp")]
     udp: Option<RefMut<'a, OtUdpState<'static>>>,
+    #[cfg(feature = "srp")]
+    srp: Option<RefMut<'a, OtSrpState<'static>>>,
 }
 
 impl OtActiveState<'_> {
@@ -918,6 +841,11 @@ impl OtActiveState<'_> {
     #[cfg(feature = "udp")]
     pub(crate) fn udp(&mut self) -> &mut OtUdpState<'static> {
         self.udp.as_mut().unwrap()
+    }
+
+    #[cfg(feature = "srp")]
+    pub(crate) fn srp(&mut self) -> &mut OtSrpState<'static> {
+        self.srp.as_mut().unwrap()
     }
 }
 
@@ -967,6 +895,8 @@ impl<'a> OtContext<'a> {
             ot: ot.state.borrow_mut(),
             #[cfg(feature = "udp")]
             udp: ot.udp_state.map(|u| u.borrow_mut()),
+            #[cfg(feature = "srp")]
+            srp: ot.srp_state.map(|s| s.borrow_mut()),
         };
 
         // Needed so that we convert from the fake `'static` lifetime in `OT_ACTIVE_STATE` to the actual `'a` lifetime of `ot`
@@ -1055,7 +985,7 @@ impl<'a> OtContext<'a> {
     }
 
     // /// caller must call this prior to setting up the host config
-    // #[cfg(feature = "srp-client")]
+    // #[cfg(feature = "srp")]
     // pub fn set_srp_state_callback(
     //     &mut self,
     //     callback: Option<&'a mut (dyn FnMut(otError, usize, usize, usize) + Send)>,
@@ -1429,5 +1359,24 @@ impl DatasetResources {
                 dataset: MaybeUninit::zeroed().assume_init(),
             }
         }
+    }
+}
+
+/// Convert an `otIp6Address`, port and network interface ID to a `SocketAddrV6`.
+#[allow(unused)]
+fn to_sock_addr(addr: &otIp6Address, port: u16, netif: u32) -> SocketAddrV6 {
+    SocketAddrV6::new(Ipv6Addr::from(unsafe { addr.mFields.m8 }), port, 0, netif)
+}
+
+/// Convert a `SocketAddrV6` to an `otSockAddr`.
+#[cfg(any(feature = "udp", feature = "srp"))]
+fn to_ot_addr(addr: &SocketAddrV6) -> otSockAddr {
+    otSockAddr {
+        mAddress: otIp6Address {
+            mFields: sys::otIp6Address__bindgen_ty_1 {
+                m8: addr.ip().octets(),
+            },
+        },
+        mPort: addr.port(),
     }
 }
