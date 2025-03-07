@@ -26,6 +26,7 @@ pub use dataset::*;
 pub use openthread_sys as sys;
 pub use radio::*;
 use signal::Signal;
+#[cfg(feature = "udp")]
 pub use udp::*;
 
 mod dataset;
@@ -38,6 +39,7 @@ mod radio;
 mod signal;
 #[cfg(feature = "srp-client")]
 mod srp_client;
+#[cfg(feature = "udp")]
 mod udp;
 
 use sys::{
@@ -128,6 +130,7 @@ impl<'a> OpenThread<'a> {
 
         let mut this = Self {
             state,
+            #[cfg(feature = "udp")]
             udp_state: None,
         };
 
@@ -145,6 +148,7 @@ impl<'a> OpenThread<'a> {
     ///
     /// Returns:
     /// - In case there were no errors related to initializing the OpenThread library, the OpenThread instance.
+    #[cfg(feature = "udp")]
     pub fn new_with_udp<const UDP_SOCKETS: usize, const UDP_RX_SZ: usize>(
         rng: &'a mut dyn RngCore,
         resources: &'a mut OtResources,
@@ -273,7 +277,7 @@ impl<'a> OpenThread<'a> {
     pub async fn wait_rx_available(&self) -> Result<(), OtError> {
         trace!("Waiting for IPv6 packet reception availability");
 
-        poll_fn(move |cx| self.activate().state().ot.rx_ipv6.poll_wait_triggered(cx)).await;
+        poll_fn(move |cx| self.activate().state().ot.rx_ipv6.poll_wait_signaled(cx)).await;
 
         Ok(())
     }
@@ -680,7 +684,7 @@ impl<'a> OpenThread<'a> {
     ///   This is necessary so that when an native OpenThread C API "ot*" function is called, OpenThread can call us "back" via the `otPlat*` API
     /// - While the returned `OpenThread` instance is in scope, the data of `OtState` stays mutably borrowed
     fn activate(&self) -> OtContext<'_> {
-        OtContext::activate_for(&self)
+        OtContext::activate_for(self)
     }
 
     // #[cfg(feature = "srp-client")]
@@ -860,13 +864,13 @@ impl OtResources {
     ///
     /// Returns:
     /// - A reference to a `RefCell<OtState>` value that represents the initialized OpenThread state.
-    // TODO: Need to manually drop/reset the signals in OtSignals
     fn init(&mut self, rng: &'static mut dyn RngCore) -> &RefCell<OtState<'static>> {
         let radio_resources = unsafe { self.radio_resources.assume_init_mut() };
         let dataset_resources = unsafe { self.dataset_resources.assume_init_mut() };
 
         radio_resources.init();
 
+        #[allow(clippy::missing_transmute_annotations)]
         self.state.write(RefCell::new(unsafe {
             core::mem::transmute(OtState {
                 rng: Some(rng),
@@ -911,6 +915,7 @@ impl OtActiveState<'_> {
     ///
     /// This method will panic if the `OpenThread` instance was not
     /// initialized with UDP resources.
+    #[cfg(feature = "udp")]
     pub(crate) fn udp(&mut self) -> &mut OtUdpState<'static> {
         self.udp.as_mut().unwrap()
     }
@@ -993,6 +998,7 @@ impl<'a> OtContext<'a> {
     }
 
     /// Gets a reference to the `OtActiveState` instance owned by this `OtContext` instance.
+    #[allow(clippy::missing_transmute_annotations)]
     fn state(&mut self) -> &mut OtActiveState<'a> {
         unsafe { core::mem::transmute(OT_ACTIVE_STATE.0.get().as_mut().unwrap().as_mut().unwrap()) }
     }
@@ -1014,17 +1020,18 @@ impl<'a> OtContext<'a> {
         };
 
         if !msg.is_null() {
-            debug!("Transmitted IPv6 packet: {:02x?}", packet);
-
             let res = unsafe { otIp6Send(state.ot.instance, msg) };
             if res != otError_OT_ERROR_DROP {
-                ot!(res)
+                ot!(res)?;
+
+                debug!("Transmitted IPv6 packet: {:02x?}", packet);
             } else {
                 // OpenThread will intentionally drop some multicast and ICMPv6 packets
                 // which are not required for the Thread network.
-                trace!("Message dropped");
-                Ok(())
+                trace!("Ipv6 message dropped");
             }
+
+            Ok(())
         } else {
             Err(OtError::new(otError_OT_ERROR_NO_BUFS))
         }
@@ -1279,7 +1286,7 @@ impl<'a> OtContext<'a> {
         let state = self.state();
 
         let conf = state.ot.radio_conf.clone();
-        state.ot.radio.signal((RadioCommand::Tx, conf));
+        state.ot.radio.signal((RadioCommand::Rx(channel), conf));
 
         Ok(())
     }
@@ -1302,20 +1309,22 @@ impl Drop for OtContext<'_> {
 /// This data lives behind a `RefCell` and is mutably borrowed each time
 /// the OpenThread stack is activated, by creating an `OtContext` instance.
 struct OtState<'a> {
-    /// The OpenThread instance associated with the `OtData` inztance.
+    /// The OpenThread instance associated with the `OtData` instance.
     instance: *mut otInstance,
     /// The random number generator associated with the `OtData` instance.
     rng: Option<&'static mut dyn RngCore>,
-    /// If not null, an Ipv6 packet egressed from OpenThread and waiting (via `OtRx`) to be ingressed somewhere else
-    /// To be used together with `OtSignals::rx_ipv6`
-    /// TODO: Maybe unite the two?
+    /// An Ipv6 packet egressed from OpenThread and waiting to be ingressed somewhere else
     rx_ipv6: Signal<*mut otMessage>,
     /// `Some` in case there is a pending OpenThread awarm which is not due yet
+    /// `None` if the existing alarm needs to be cancelled
     alarm: Signal<Option<embassy_time::Instant>>,
-    /// If `true`, the tasklets need to be run. Set by the OpenThread C library via the `otPlatTaskletsSignalPending` callback
+    /// The tasklets need to be run. Set by the OpenThread C library via the `otPlatTaskletsSignalPending` callback
     tasklets: Signal<()>,
+    /// The OpenThread state has changed. Set by the OpenThread C library via the `otPlatStateChanged` callback
     changes: Signal<()>,
+    /// The radio needs to execute the provided command, in the context of the provided configuration.
     radio: Signal<(RadioCommand, radio::Config)>,
+    /// The latest radio configuration from the POV of OpenThread
     radio_conf: radio::Config,
     /// Resources for the radio (PHY data frames and their descriptors)
     radio_resources: &'a mut RadioResources,
@@ -1326,6 +1335,7 @@ struct OtState<'a> {
 /// A command for the radio runner to process.
 #[derive(Debug)]
 enum RadioCommand {
+    /// (Re)configure the radio
     Conf,
     /// Transmit a frame
     /// The data of the frame is in `OtData::radio_resources.snd_frame` and `OtData::radio_resources.snd_psdu`
@@ -1361,16 +1371,20 @@ struct RadioResources {
     /// A frame which is to be send to the radio
     snd_frame: otRadioFrame,
     /// The PSDU of the received frame
-    /// NOTE:
     rcv_psdu: [u8; OT_RADIO_FRAME_MAX_SIZE as usize],
+    /// The PSDU of the frame to be send by the OpenThread C code
+    /// OpenThread C code keeps hold of this buffer accross callbacks to us
     tns_psdu: [u8; OT_RADIO_FRAME_MAX_SIZE as usize],
+    /// The PSDU of the frame to be send by the radio
     snd_psdu: [u8; OT_RADIO_FRAME_MAX_SIZE as usize],
+    /// The PSDU of the ACK frame send to `otPlatRadioReceiveDone` TBD why we need that
     ack_psdu: [u8; OT_RADIO_FRAME_MAX_SIZE as usize],
 }
 
 impl RadioResources {
     /// Create a new `RadioResources` instance.
-    pub const fn new() -> Self {
+    #[allow(unused)]
+    const fn new() -> Self {
         unsafe {
             Self {
                 rcv_frame: MaybeUninit::zeroed().assume_init(),
@@ -1408,7 +1422,8 @@ struct DatasetResources {
 
 impl DatasetResources {
     /// Create a new `DatasetResources` instance.
-    pub const fn new() -> Self {
+    #[allow(unused)]
+    const fn new() -> Self {
         unsafe {
             Self {
                 dataset: MaybeUninit::zeroed().assume_init(),
