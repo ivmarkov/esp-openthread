@@ -27,15 +27,27 @@ use crate::sys::{
 };
 use crate::{ot, to_ot_addr, to_sock_addr, OpenThread, OtContext, OtError};
 
+/// The unique ID of a registered SRP service
 pub struct SrpServiceId(usize, PhantomData<*const ()>);
 
 unsafe impl Send for SrpServiceId {}
 
+/// The resources (data) that is necessary for the OpenThread stack to operate with SRP services.
+///
+/// A separate type so that it can be allocated outside of the OpenThread futures,
+/// thus avoiding expensive mem-moves.
+///
+/// Can also be statically-allocated.
 pub struct OtSrpResources<const SRP_SVCS: usize, const SRP_BUF_SZ: usize> {
+    /// Memory for up to `SRP_SVCS` SRP services
     services: MaybeUninit<[otSrpClientService; SRP_SVCS]>,
+    /// Whether a service slot in the above memory is taken
     taken: MaybeUninit<[bool; SRP_SVCS]>,
+    /// Memory for the SRP configuration (host name and IP addresses)
     conf: MaybeUninit<[u8; SRP_BUF_SZ]>,
+    /// Memory for the SRP service data
     buffers: MaybeUninit<[[u8; SRP_BUF_SZ]; SRP_SVCS]>,
+    /// The state of the SRP services, from Rust POV
     state: MaybeUninit<RefCell<OtSrpState<'static>>>,
 }
 
@@ -59,6 +71,7 @@ impl<const SRP_SVCS: usize, const SRP_BUF_SZ: usize> OtSrpResources<SRP_SVCS, SR
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT_BUFFERS: [u8; SRP_BUF_SZ] = [0; SRP_BUF_SZ];
 
+    /// Create a new `OtSrpResources` instance.
     pub const fn new() -> Self {
         Self {
             services: MaybeUninit::uninit(),
@@ -69,6 +82,10 @@ impl<const SRP_SVCS: usize, const SRP_BUF_SZ: usize> OtSrpResources<SRP_SVCS, SR
         }
     }
 
+    /// Initialize the resouces, as they start their life as `MaybeUninit` so as to avoid mem-moves.
+    ///
+    /// Returns:
+    /// - A reference to a `RefCell<OtSrpState>` value that represents the initialized OpenThread SRP state.
     pub(crate) fn init(&mut self) -> &mut RefCell<OtSrpState<'static>> {
         self.services.write([Self::INIT_SERVICE; SRP_SVCS]);
         self.taken.write([false; SRP_SVCS]);
@@ -105,6 +122,10 @@ impl<const SRP_SVCS: usize, const SRP_BUF_SZ: usize> Default
     }
 }
 
+/// The SRP state of the OpenThread stack, from Rust POV.
+///
+/// This data lives behind a `RefCell` and is mutably borrowed each time
+/// the OpenThread stack is activated, by creating an `OtContext` instance.
 pub(crate) struct OtSrpState<'a> {
     services: &'a mut [otSrpClientService],
     taken: &'a mut [bool],
@@ -113,16 +134,26 @@ pub(crate) struct OtSrpState<'a> {
     buf_len: usize,
 }
 
+/// An enum describing the status of either a concrete SRP service, or the SRP host.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum SrpState {
+    /// The service/host is to be added/registered.
     ToAdd,
+    /// The service/host is being added/registered.
     Adding,
+    /// The service/host is to be refreshed (re-register to renew lease).
     ToRefresh,
+    /// The service/host is being refreshed.
     Refreshing,
+    /// The service/host is to be removed/unregistered.
     ToRemove,
+    /// The service/host is being removed/unregistered.
     Removing,
+    /// The service/host has been removed/unregistered.
     Removed,
+    /// The service/host is registered.
     Registered,
+    /// Any other state.
     Other(u32),
 }
 
@@ -143,16 +174,28 @@ impl From<otSrpClientItemState> for SrpState {
     }
 }
 
+/// The SRP configuration of the OpenThread stack.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SrpConf<'a> {
+    /// SRP hostname
     pub host_name: &'a str,
+    /// SRP host Ipv6 addresses.
+    /// If empty, the SRP implementation will automatically set the host addresses
+    /// by itself, using non-link-local addresses, once these become available.
     pub host_addrs: &'a [Ipv6Addr],
+    /// SRP TTL (Time To Live) value.
     pub ttl: u32,
+    /// Default lease time for SRP services if they specify 0 for their lease time.
+    /// Set to 0 to use the OpenThread default value.
     pub default_lease_secs: u32,
+    /// Default key lease time for SRP services' keys if they specify 0 for their key lease time.
+    /// Set to 0 to use the OpenThread default value.
     pub default_key_lease_secs: u32,
 }
 
 impl<'a> SrpConf<'a> {
+    /// Create a new `SrpConf` instance, wuth a host named "ot-device",
+    /// no explicit host addresses, a TTL of 60 seconds, and default lease times.
     pub const fn new() -> Self {
         Self {
             host_name: "ot-device",
@@ -189,16 +232,28 @@ impl Default for SrpConf<'_> {
     }
 }
 
+/// An SRP service that can be registered with the OpenThread stack.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SrpService<'a> {
+    /// The service name.
     pub name: &'a str,
+    /// The instance name.
     pub instance_name: &'a str,
+    /// The subtype labels.
     pub subtype_labels: &'a [&'a str],
+    /// The TXT entries.
     pub txt_entries: &'a [(&'a str, &'a [u8])],
+    /// The service port.
     pub port: u16,
+    /// The service priority.
     pub priority: u16,
+    /// The service weight.
     pub weight: u16,
+    /// The service lease time in seconds.
+    /// Set to 0 to use the default value as specified in `SrpConf`.
     pub lease_secs: u32,
+    /// The service key lease time in seconds.
+    /// Set to 0 to use the default value as specified in `SrpConf`.
     pub key_lease_secs: u32,
 }
 
@@ -339,6 +394,10 @@ impl From<&otSrpClientService> for SrpService<'_> {
 }
 
 impl OpenThread<'_> {
+    /// Return the current SRP client configuration and SRP client host state to the provided closure.
+    ///
+    /// Arguments:
+    /// - `f`: A closure that takes the SRP configuration and SRP host state as arguments.
     pub fn srp_conf<F, R>(&self, f: F) -> Result<R, OtError>
     where
         F: FnOnce(&SrpConf, SrpState) -> Result<R, OtError>,
@@ -373,6 +432,10 @@ impl OpenThread<'_> {
         f(&conf, info.mState.into())
     }
 
+    /// Set the SRP client configuration.
+    ///
+    /// Arguments:
+    /// - `conf`: The SRP configuration.
     pub fn srp_set_conf(&self, conf: &SrpConf) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -412,6 +475,7 @@ impl OpenThread<'_> {
         Ok(())
     }
 
+    /// Return `true` if the SRP client is running, `false` otherwise.
     pub fn srp_running(&self) -> Result<bool, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -420,6 +484,7 @@ impl OpenThread<'_> {
         Ok(unsafe { otSrpClientIsRunning(instance) })
     }
 
+    /// Return `true` if the SRP client is in auto-start mode, `false` otherwise.
     pub fn srp_autostart_enabled(&self) -> Result<bool, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -428,6 +493,7 @@ impl OpenThread<'_> {
         Ok(unsafe { otSrpClientIsAutoStartModeEnabled(instance) })
     }
 
+    /// Auto-starts the SRP client.
     pub fn srp_autostart(&self) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -444,6 +510,10 @@ impl OpenThread<'_> {
         Ok(())
     }
 
+    /// Start the SRP client for the given SRP server address.
+    ///
+    /// Arguments:
+    /// - `server_addr`: The SRP server address.
     pub fn srp_start(&self, server_addr: SocketAddrV6) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -452,6 +522,7 @@ impl OpenThread<'_> {
         ot!(unsafe { otSrpClientStart(instance, &to_ot_addr(&server_addr)) })
     }
 
+    /// Stop the SRP client.
     pub fn srp_stop(&self) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -464,6 +535,8 @@ impl OpenThread<'_> {
         Ok(())
     }
 
+    /// Return the SRP server address, if the SRP client is running and
+    /// had connected to a server.
     pub fn srp_server_addr(&self) -> Result<Option<SocketAddrV6>, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -477,6 +550,10 @@ impl OpenThread<'_> {
         Ok((!addr.ip().is_unspecified()).then_some(addr))
     }
 
+    /// Add an SRP service to the SRP client.
+    ///
+    /// Arguments:
+    /// - `service`: The SRP service to add.
     pub fn srp_add_service(&self, service: &SrpService) -> Result<SrpServiceId, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
@@ -502,7 +579,17 @@ impl OpenThread<'_> {
         Ok(SrpServiceId(slot, PhantomData))
     }
 
-    pub fn srp_remove_service(&self, service: SrpServiceId, clear: bool) -> Result<(), OtError> {
+    /// Remove an SRP service from the SRP client.
+    ///
+    /// Arguments:
+    /// - `service`: The SRP service to remove.
+    /// - `immediate`: If `true`, the service will be removed immediately, otherwise, the service will be removed gracefully
+    ///   by propagating the removal info to the SRP server.
+    pub fn srp_remove_service(
+        &self,
+        service: SrpServiceId,
+        immediate: bool,
+    ) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
         let srp = ot.state().srp()?;
@@ -510,7 +597,7 @@ impl OpenThread<'_> {
         assert!(service.0 < srp.taken.len());
         assert!(srp.taken[service.0]);
 
-        if clear {
+        if immediate {
             ot!(unsafe { otSrpClientClearService(instance, &mut srp.services[service.0]) })?;
         } else {
             // TODO
@@ -524,12 +611,17 @@ impl OpenThread<'_> {
         Ok(())
     }
 
-    pub fn srp_remove_all(&self, clear: bool) -> Result<(), OtError> {
+    /// Remove the SRP hostname and all SRP services from the SRP client.
+    ///
+    /// Arguments:
+    /// - `immediate`: If `true`, the hostname and services will be removed immediately, otherwise,
+    ///   the hostname and services will be removed gracefully by propagating the removal info to the SRP server.
+    pub fn srp_remove_all(&self, immediate: bool) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
         let srp = ot.state().srp()?;
 
-        if clear {
+        if immediate {
             unsafe {
                 otSrpClientClearHostAndServices(instance);
             }
@@ -545,6 +637,11 @@ impl OpenThread<'_> {
         Ok(())
     }
 
+    /// Iterate over the SRP services registered with the SRP client.
+    ///
+    /// Arguments:
+    /// - `f`: A closure that receives a tuple of the next SRP service, SRP service state, and SRP service ID.
+    ///   If there are no more SRP services, the closure will receive `None`.
     pub fn srp_services<F>(&self, mut f: F) -> Result<(), OtError>
     where
         F: FnMut(Option<(&SrpService, SrpState, SrpServiceId)>),
