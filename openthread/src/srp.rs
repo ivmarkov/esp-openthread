@@ -5,7 +5,6 @@ use core::mem::MaybeUninit;
 use core::net::{Ipv6Addr, SocketAddrV6};
 
 use log::{debug, info};
-use openthread_sys::otError_OT_ERROR_FAILED;
 
 use crate::sys::{
     otDnsTxtEntry, otError_OT_ERROR_NO_BUFS, otIp6Address, otSrpClientAddService,
@@ -124,23 +123,22 @@ pub enum SrpState {
     Removing,
     Removed,
     Registered,
+    Other(u32),
 }
 
 #[allow(non_upper_case_globals)]
-impl TryFrom<otSrpClientItemState> for SrpState {
-    type Error = OtError;
-
-    fn try_from(value: otSrpClientItemState) -> Result<SrpState, Self::Error> {
+impl From<otSrpClientItemState> for SrpState {
+    fn from(value: otSrpClientItemState) -> Self {
         match value {
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_TO_ADD => Ok(SrpState::ToAdd),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_ADDING => Ok(SrpState::Adding),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_TO_REFRESH => Ok(SrpState::ToRefresh),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REFRESHING => Ok(SrpState::Refreshing),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_TO_REMOVE => Ok(SrpState::ToRemove),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REMOVING => Ok(SrpState::Removing),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REMOVED => Ok(SrpState::Removed),
-            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REGISTERED => Ok(SrpState::Registered),
-            _ => Err(OtError::new(otError_OT_ERROR_FAILED)),
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_TO_ADD => Self::ToAdd,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_ADDING => Self::Adding,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_TO_REFRESH => Self::ToRefresh,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REFRESHING => Self::Refreshing,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_TO_REMOVE => Self::ToRemove,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REMOVING => Self::Removing,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REMOVED => Self::Removed,
+            otSrpClientItemState_OT_SRP_CLIENT_ITEM_STATE_REGISTERED => Self::Registered,
+            other => Self::Other(other),
         }
     }
 }
@@ -372,7 +370,7 @@ impl OpenThread<'_> {
             default_key_lease_secs: unsafe { otSrpClientGetKeyLeaseInterval(instance) },
         };
 
-        f(&conf, info.mState.try_into()?)
+        f(&conf, info.mState.into())
     }
 
     pub fn srp_set_conf(&self, conf: &SrpConf) -> Result<(), OtError> {
@@ -568,7 +566,7 @@ impl OpenThread<'_> {
 
             f(Some((
                 &service.into(),
-                service.mState.try_into()?,
+                service.mState.into(),
                 SrpServiceId(slot, PhantomData),
             )));
         }

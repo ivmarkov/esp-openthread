@@ -105,7 +105,7 @@ impl<'a> UdpSocket<'a> {
     pub async fn wait_recv_available(&self) -> Result<(), OtError> {
         poll_fn(move |cx| {
             self.ot.activate().state().udp()?.sockets[self.slot]
-                .rx_peer
+                .rx
                 .poll_wait_signaled(cx)
                 .map(Ok)
         })
@@ -120,20 +120,28 @@ impl<'a> UdpSocket<'a> {
     ///
     /// Returns:
     /// - The number of bytes received.
+    /// - The local address to which the packet was received.
     /// - The peer address from where the packet was received.
     ///
     /// NOTE:
     /// It is not advised to call this method concurrently from multiple async tasks
     /// because it uses a single waker registration. Thus, while the method will not panic,
     /// the tasks will fight with each other by each re-registering its own waker, thus keeping the CPU constantly busy.
-    pub async fn recv(&self, buf: &mut [u8]) -> Result<(usize, SocketAddrV6), OtError> {
+    pub async fn recv(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(usize, SocketAddrV6, SocketAddrV6), OtError> {
         if buf.is_empty() {
-            return Ok((0, SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)));
+            return Ok((
+                0,
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
+            ));
         }
 
-        let (len, src_addr) = poll_fn(move |cx| {
+        let (len, local_addr, remote_addr) = poll_fn(move |cx| {
             self.ot.activate().state().udp()?.sockets[self.slot]
-                .rx_peer
+                .rx
                 .poll_wait(cx)
                 .map(Ok::<_, OtError>)
         })
@@ -148,15 +156,22 @@ impl<'a> UdpSocket<'a> {
         let len = len.min(buf.len());
         buf[..len].copy_from_slice(&data[..len]);
 
-        Ok((len, src_addr))
+        Ok((len, local_addr, remote_addr))
     }
 
     /// Send data to the specified destination.
     ///
     /// Arguments:
     /// - `data`: The data to send.
+    /// - `src`: The source address.
+    ///   If not provided, the source address from the socket will be used.
     /// - `dst`: The destination address.
-    pub async fn send(&self, data: &[u8], dst: &SocketAddrV6) -> Result<(), OtError> {
+    pub async fn send(
+        &self,
+        data: &[u8],
+        src: Option<&SocketAddrV6>,
+        dst: &SocketAddrV6,
+    ) -> Result<(), OtError> {
         let mut ot = self.ot.activate();
         let state = ot.state();
         let instance = state.ot.instance;
@@ -167,24 +182,27 @@ impl<'a> UdpSocket<'a> {
         if !msg.is_null() {
             ot!(unsafe { otMessageAppend(msg, data.as_ptr() as *mut _, data.len() as _) })?;
 
+            let socket = &mut udp.sockets[self.slot];
+            assert!(socket.taken);
+
             let mut message_info = otMessageInfo {
-                mSockAddr: otIp6Address {
-                    mFields: otIp6Address__bindgen_ty_1 { m32: [0, 0, 0, 0] },
-                },
+                mSockAddr: socket.ot_socket.mSockName.mAddress,
                 mPeerAddr: otIp6Address {
                     mFields: otIp6Address__bindgen_ty_1 { m32: [0, 0, 0, 0] },
                 },
-                mSockPort: 0,
-                mPeerPort: 0,
+                mSockPort: socket.ot_socket.mSockName.mPort,
+                mPeerPort: dst.port(),
                 mHopLimit: 0,
                 _bitfield_align_1: [0u8; 0],
                 _bitfield_1: __BindgenBitfieldUnit::new([0u8; 1]),
             };
 
-            message_info.mPeerAddr.mFields.m8 = dst.ip().octets();
-            message_info.mPeerPort = dst.port();
+            if let Some(src) = src {
+                message_info.mSockAddr.mFields.m8 = src.ip().octets();
+                message_info.mSockPort = src.port();
+            }
 
-            let socket = &mut udp.sockets[self.slot];
+            message_info.mPeerAddr.mFields.m8 = dst.ip().octets();
 
             let res = unsafe { otUdpSend(instance, &mut socket.ot_socket, msg, &message_info) };
             if res != otError_OT_ERROR_DROP {
@@ -217,7 +235,7 @@ impl<'a> UdpSocket<'a> {
         };
 
         let socket = &mut udp.sockets[slot];
-        if socket.rx_peer.signaled() {
+        if socket.rx.signaled() {
             return;
         }
 
@@ -239,9 +257,11 @@ impl<'a> UdpSocket<'a> {
                 );
             };
 
-            socket
-                .rx_peer
-                .signal((msg_len, to_sock_addr(&msg_info.mPeerAddr, 0, 0)));
+            socket.rx.signal((
+                msg_len,
+                to_sock_addr(&msg_info.mSockAddr, msg_info.mSockPort, 0),
+                to_sock_addr(&msg_info.mPeerAddr, msg_info.mPeerPort, 0),
+            ));
         }
     }
 }
@@ -345,7 +365,7 @@ pub(crate) struct UdpSocketCtx {
     /// The OpenThread native UDP socket.
     ot_socket: otUdpSocket,
     /// The signal that is triggered when a UDP packet is received.
-    rx_peer: Signal<(usize, SocketAddrV6)>,
+    rx: Signal<(usize, SocketAddrV6, SocketAddrV6)>,
 }
 
 impl UdpSocketCtx {
@@ -371,7 +391,7 @@ impl UdpSocketCtx {
                 mHandle: core::ptr::null_mut(),
                 mNext: core::ptr::null_mut(),
             },
-            rx_peer: Signal::new(),
+            rx: Signal::new(),
         }
     }
 }

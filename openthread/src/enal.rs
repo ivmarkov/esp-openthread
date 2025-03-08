@@ -18,7 +18,7 @@ impl edge_nal::io::ErrorType for UdpSocket<'_> {
 
 impl edge_nal::UdpSend for UdpSocket<'_> {
     async fn send(&mut self, remote: SocketAddr, data: &[u8]) -> Result<(), Self::Error> {
-        UdpSocket::send(self, data, &socket_addr_v6(remote)?).await
+        UdpSocket::send(self, data, None, &socket_addr_v6(remote)?).await
     }
 }
 
@@ -26,7 +26,7 @@ impl edge_nal::UdpReceive for UdpSocket<'_> {
     async fn receive(&mut self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Self::Error> {
         UdpSocket::recv(self, buf)
             .await
-            .map(|(n, addr)| (n, addr.into()))
+            .map(|(n, _, addr)| (n, addr.into()))
     }
 }
 
@@ -104,7 +104,7 @@ impl edge_nal::io::ErrorType for &UdpSocket<'_> {
 
 impl edge_nal::UdpSend for &UdpSocket<'_> {
     async fn send(&mut self, remote: SocketAddr, data: &[u8]) -> Result<(), Self::Error> {
-        UdpSocket::send(self, data, &socket_addr_v6(remote)?).await
+        UdpSocket::send(self, data, None, &socket_addr_v6(remote)?).await
     }
 }
 
@@ -112,7 +112,7 @@ impl edge_nal::UdpReceive for &UdpSocket<'_> {
     async fn receive(&mut self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Self::Error> {
         UdpSocket::recv(self, buf)
             .await
-            .map(|(n, addr)| (n, addr.into()))
+            .map(|(n, _, addr)| (n, addr.into()))
     }
 }
 

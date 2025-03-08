@@ -126,11 +126,11 @@ async fn main(spawner: Spawner) {
     let buf: &mut [u8] = unsafe { mk_static!([u8; UDP_SOCKETS_BUF]).assume_init_mut() };
 
     loop {
-        let (len, remote) = socket.recv(buf).await.unwrap();
+        let (len, local, remote) = socket.recv(buf).await.unwrap();
 
-        info!("Got {:02x?} from {remote}", &buf[..len]);
+        info!("Got {:02x?} from {remote} on {local}", &buf[..len]);
 
-        socket.send(b"Hello", &remote).await.unwrap();
+        socket.send(b"Hello", Some(&local), &remote).await.unwrap();
         info!("Sent `b\"Hello\"`");
     }
 }
