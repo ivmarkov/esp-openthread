@@ -35,8 +35,8 @@ static_cell = "2.1"
 openthread = { path = "../../openthread", features = ["embassy-net-driver-channel"] }
 
 [[bin]]
-path = "./src/bin/basic.rs"
-name = "basic"
+path = "./src/bin/enet_basic.rs"
+name = "enet_basic"
 harness = false
 
 #[[bin]]
