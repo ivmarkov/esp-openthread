@@ -319,8 +319,16 @@ impl<'a> SrpService<'a> {
 impl From<&otSrpClientService> for SrpService<'_> {
     fn from(ot_srp: &otSrpClientService) -> Self {
         Self {
-            name: unsafe { CStr::from_ptr(ot_srp.mName).to_str().unwrap() },
-            instance_name: unsafe { CStr::from_ptr(ot_srp.mInstanceName).to_str().unwrap() },
+            name: if !ot_srp.mName.is_null() {
+                unsafe { CStr::from_ptr(ot_srp.mName).to_str().unwrap() }
+            } else {
+                ""
+            },
+            instance_name: if !ot_srp.mInstanceName.is_null() {
+                unsafe { CStr::from_ptr(ot_srp.mInstanceName).to_str().unwrap() }
+            } else {
+                ""
+            },
             subtype_labels: &[], // TODO subtype_labels.as_slice(),
             txt_entries: &[],    // TODO txt_entries.as_slice(),
             port: ot_srp.mPort,
@@ -339,13 +347,25 @@ impl OpenThread<'_> {
     {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
         let info = unsafe { otSrpClientGetHostInfo(instance).as_ref().unwrap() };
 
         let conf = SrpConf {
-            host_name: unsafe { CStr::from_ptr(info.mName).to_str().unwrap() },
-            host_addrs: unsafe {
-                core::slice::from_raw_parts(info.mAddresses as *const _, info.mNumAddresses as _)
+            host_name: if !info.mName.is_null() {
+                unsafe { CStr::from_ptr(info.mName).to_str().unwrap() }
+            } else {
+                ""
+            },
+            host_addrs: if info.mNumAddresses > 0 && !info.mAddresses.is_null() {
+                unsafe {
+                    core::slice::from_raw_parts(
+                        info.mAddresses as *const _,
+                        info.mNumAddresses as _,
+                    )
+                }
+            } else {
+                &[]
             },
             ttl: unsafe { otSrpClientGetTtl(instance) },
             default_lease_secs: unsafe { otSrpClientGetLeaseInterval(instance) },
@@ -358,7 +378,7 @@ impl OpenThread<'_> {
     pub fn srp_set_conf(&self, conf: &SrpConf) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
-        let srp = ot.state().srp();
+        let srp = ot.state().srp()?;
 
         ot!(unsafe { otSrpClientSetHostName(instance, c"".as_ptr()) })?;
         ot!(unsafe { otSrpClientEnableAutoHostAddress(instance) })?;
@@ -394,23 +414,26 @@ impl OpenThread<'_> {
         Ok(())
     }
 
-    pub fn srp_running(&self) -> bool {
+    pub fn srp_running(&self) -> Result<bool, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
-        unsafe { otSrpClientIsRunning(instance) }
+        Ok(unsafe { otSrpClientIsRunning(instance) })
     }
 
-    pub fn srp_autostart_enabled(&self) -> bool {
+    pub fn srp_autostart_enabled(&self) -> Result<bool, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
-        unsafe { otSrpClientIsAutoStartModeEnabled(instance) }
+        Ok(unsafe { otSrpClientIsAutoStartModeEnabled(instance) })
     }
 
-    pub fn srp_autostart(&self) {
+    pub fn srp_autostart(&self) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
         unsafe {
             otSrpClientEnableAutoStartMode(
@@ -419,38 +442,47 @@ impl OpenThread<'_> {
                 instance as _,
             );
         }
+
+        Ok(())
     }
 
     pub fn srp_start(&self, server_addr: SocketAddrV6) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
         ot!(unsafe { otSrpClientStart(instance, &to_ot_addr(&server_addr)) })
     }
 
-    pub fn srp_stop(&self) {
+    pub fn srp_stop(&self) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
-        unsafe { otSrpClientStop(instance) }
+        unsafe {
+            otSrpClientStop(instance);
+        }
+
+        Ok(())
     }
 
-    pub fn srp_server_addr(&self) -> Option<SocketAddrV6> {
+    pub fn srp_server_addr(&self) -> Result<Option<SocketAddrV6>, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
+        let _ = ot.state().srp()?;
 
         let addr = unsafe { otSrpClientGetServerAddress(instance).as_ref().unwrap() };
         let addr = to_sock_addr(&addr.mAddress, addr.mPort, 0);
 
         // OT documentation notes that if the SRP client is not running
         // this will return the unspecified addr (0.0.0.0.0.0.0.0)
-        (!addr.ip().is_unspecified()).then_some(addr)
+        Ok((!addr.ip().is_unspecified()).then_some(addr))
     }
 
     pub fn srp_add_service(&self, service: &SrpService) -> Result<SrpServiceId, OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
-        let srp = ot.state().srp();
+        let srp = ot.state().srp()?;
 
         let slot = srp
             .taken
@@ -475,7 +507,7 @@ impl OpenThread<'_> {
     pub fn srp_remove_service(&self, service: SrpServiceId, clear: bool) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
-        let srp = ot.state().srp();
+        let srp = ot.state().srp()?;
 
         assert!(service.0 < srp.taken.len());
         assert!(srp.taken[service.0]);
@@ -497,7 +529,7 @@ impl OpenThread<'_> {
     pub fn srp_remove_all(&self, clear: bool) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
-        let srp = ot.state().srp();
+        let srp = ot.state().srp()?;
 
         if clear {
             unsafe {
@@ -521,7 +553,7 @@ impl OpenThread<'_> {
     {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
-        let srp = ot.state().srp();
+        let srp = ot.state().srp()?;
 
         let service: *const otSrpClientService = unsafe { otSrpClientGetServices(instance) };
 

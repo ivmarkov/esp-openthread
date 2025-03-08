@@ -847,16 +847,30 @@ struct OtActiveState<'a> {
 impl OtActiveState<'_> {
     /// A utility to get a reference to the UDP state
     ///
-    /// This method will panic if the `OpenThread` instance was not
+    /// This method will return an error if the `OpenThread` instance was not
     /// initialized with UDP resources.
     #[cfg(feature = "udp")]
-    pub(crate) fn udp(&mut self) -> &mut OtUdpState<'static> {
-        self.udp.as_mut().unwrap()
+    pub(crate) fn udp(&mut self) -> Result<&mut OtUdpState<'static>, OtError> {
+        let udp = self
+            .udp
+            .as_mut()
+            .ok_or(OtError::new(otError_OT_ERROR_FAILED))?;
+
+        Ok(udp)
     }
 
+    /// A utility to get a reference to the SRP state
+    ///
+    /// This method will return an error if the `OpenThread` instance was not
+    /// initialized with SRP resources.
     #[cfg(feature = "srp")]
-    pub(crate) fn srp(&mut self) -> &mut OtSrpState<'static> {
-        self.srp.as_mut().unwrap()
+    pub(crate) fn srp(&mut self) -> Result<&mut OtSrpState<'static>, OtError> {
+        let srp = self
+            .srp
+            .as_mut()
+            .ok_or(OtError::new(otError_OT_ERROR_FAILED))?;
+
+        Ok(srp)
     }
 }
 

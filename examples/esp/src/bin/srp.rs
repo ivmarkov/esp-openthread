@@ -24,7 +24,7 @@ use log::info;
 
 use openthread::esp::EspRadio;
 use openthread::{
-    OpenThread, OperationalDataset, OtResources, OtUdpResources, SrpConf, ThreadTimestamp,
+    OpenThread, OperationalDataset, OtResources, OtSrpResources, OtUdpResources, SrpConf, ThreadTimestamp,
     UdpSocket,
 };
 
@@ -48,6 +48,9 @@ const BOUND_PORT: u16 = 1212;
 const UDP_SOCKETS_BUF: usize = 1280;
 const UDP_MAX_SOCKETS: usize = 2;
 
+const SRP_SERVICE_BUF: usize = 300;
+const SRP_MAX_SERVICES: usize = 2;
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     esp_println::logger::init_logger(log::LevelFilter::Info);
@@ -63,8 +66,10 @@ async fn main(spawner: Spawner) {
     let ot_resources = mk_static!(OtResources, OtResources::new());
     let ot_udp_resources =
         mk_static!(OtUdpResources<UDP_MAX_SOCKETS, UDP_SOCKETS_BUF>, OtUdpResources::new());
+    let ot_srp_resources =
+        mk_static!(OtSrpResources<SRP_MAX_SERVICES, SRP_SERVICE_BUF>, OtSrpResources::new());
 
-    let ot = OpenThread::new_with_udp(rng, ot_resources, ot_udp_resources).unwrap();
+    let ot = OpenThread::new_with_udp_srp(rng, ot_resources, ot_udp_resources, ot_srp_resources).unwrap();
 
     spawner
         .spawn(run_ot(
@@ -107,7 +112,7 @@ async fn main(spawner: Spawner) {
     })
     .unwrap();
 
-    ot.srp_autostart();
+    ot.srp_autostart().unwrap();
 
     let socket = UdpSocket::bind(
         ot,
@@ -147,7 +152,7 @@ async fn run_ot_info(ot: OpenThread<'static>) -> ! {
         let addrs_len = ot.ipv6_addrs(&mut addrs).unwrap();
 
         let mut state = cur_state;
-        let server_addr = ot.srp_server_addr();
+        let server_addr = ot.srp_server_addr().unwrap();
 
         ot.srp_conf(|_, new_state| {
             state = Some(new_state);
@@ -159,7 +164,7 @@ async fn run_ot_info(ot: OpenThread<'static>) -> ! {
             || cur_state != state
             || cur_server_addr != server_addr
         {
-            info!("Got new IPv6 address(es) and/or SRP state from OpenThread:\nIP addrs: {addrs:?}\nSRP state: {state:?}\nSRP server addr: {server_addr:?}");
+            info!("Got new IPv6 address(es) and/or SRP state from OpenThread:\nIP addrs: {:?}\nSRP state: {state:?}\nSRP server addr: {server_addr:?}", &addrs[..addrs_len]);
 
             cur_addrs = addrs;
             cur_addrs_len = addrs_len;

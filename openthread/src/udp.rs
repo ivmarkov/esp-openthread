@@ -31,6 +31,7 @@ impl<'a> UdpSocket<'a> {
         {
             let mut ot = this.ot.activate();
             let state = ot.state();
+            let _ = state.udp()?;
 
             unsafe {
                 otUdpBind(
@@ -52,11 +53,12 @@ impl<'a> UdpSocket<'a> {
         {
             let mut ot = this.ot.activate();
             let state = ot.state();
+            let _ = state.udp()?;
 
             unsafe {
                 otUdpConnect(
                     state.ot.instance,
-                    &mut state.udp().sockets[this.slot].ot_socket,
+                    &mut state.udp()?.sockets[this.slot].ot_socket,
                     &to_ot_addr(remote),
                 );
             }
@@ -70,7 +72,7 @@ impl<'a> UdpSocket<'a> {
         let mut active_ot = ot.activate();
         let state = active_ot.state();
         let instance = state.ot.instance;
-        let udp = state.udp();
+        let udp = state.udp()?;
 
         let slot = udp
             .sockets
@@ -102,13 +104,12 @@ impl<'a> UdpSocket<'a> {
     /// the tasks will fight with each other by each re-registering its own waker, thus keeping the CPU constantly busy.
     pub async fn wait_recv_available(&self) -> Result<(), OtError> {
         poll_fn(move |cx| {
-            self.ot.activate().state().udp().sockets[self.slot]
+            self.ot.activate().state().udp()?.sockets[self.slot]
                 .rx_peer
                 .poll_wait_signaled(cx)
+                .map(Ok)
         })
-        .await;
-
-        Ok(())
+        .await
     }
 
     /// Receive data from the socket.
@@ -131,14 +132,15 @@ impl<'a> UdpSocket<'a> {
         }
 
         let (len, src_addr) = poll_fn(move |cx| {
-            self.ot.activate().state().udp().sockets[self.slot]
+            self.ot.activate().state().udp()?.sockets[self.slot]
                 .rx_peer
                 .poll_wait(cx)
+                .map(Ok::<_, OtError>)
         })
-        .await;
+        .await?;
 
         let mut ot = self.ot.activate();
-        let udp = ot.state().udp();
+        let udp = ot.state().udp()?;
 
         let offset = self.slot * udp.buf_len;
         let data = &mut udp.buffers[offset..offset + len];
@@ -158,7 +160,7 @@ impl<'a> UdpSocket<'a> {
         let mut ot = self.ot.activate();
         let state = ot.state();
         let instance = state.ot.instance;
-        let udp = state.udp();
+        let udp = state.udp()?;
 
         let msg = unsafe { otUdpNewMessage(instance, core::ptr::null()) };
 
@@ -209,7 +211,10 @@ impl<'a> UdpSocket<'a> {
         let slot: usize = slot as usize;
 
         let mut ot = OtContext::callback(core::ptr::null_mut());
-        let udp = ot.state().udp();
+        let Ok(udp) = ot.state().udp() else {
+            // We cannot receive if there is not at least one active UDP socket
+            unreachable!();
+        };
 
         let socket = &mut udp.sockets[slot];
         if socket.rx_peer.signaled() {
@@ -245,7 +250,7 @@ impl Drop for UdpSocket<'_> {
     fn drop(&mut self) {
         let mut ot = self.ot.activate();
         let instance = ot.state().ot.instance;
-        let udp = ot.state().udp();
+        let udp = ot.state().udp().unwrap();
 
         ot!(unsafe { otUdpClose(instance, &mut udp.sockets[self.slot].ot_socket) }).unwrap();
 
