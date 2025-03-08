@@ -401,11 +401,11 @@ impl OpenThread<'_> {
         }
     }
 
-    pub fn srp_start(&self, addr: SocketAddrV6) -> Result<(), OtError> {
+    pub fn srp_start(&self, server_addr: SocketAddrV6) -> Result<(), OtError> {
         let mut ot = self.activate();
         let instance = ot.state().ot.instance;
 
-        ot!(unsafe { otSrpClientStart(instance, &to_ot_addr(&addr)) })
+        ot!(unsafe { otSrpClientStart(instance, &to_ot_addr(&server_addr)) })
     }
 
     pub fn srp_stop(&self) {
