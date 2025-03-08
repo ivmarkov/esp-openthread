@@ -424,6 +424,15 @@ impl<'a> OpenThread<'a> {
                     state.ot.instance as *mut _,
                 )
             }
+
+            #[cfg(feature = "srp")]
+            unsafe {
+                crate::sys::otSrpClientSetCallback(
+                    state.ot.instance,
+                    Some(OtContext::plat_c_srp_state_change_callback),
+                    state.ot.instance as *mut _,
+                )
+            }
         }
 
         Ok(())
@@ -986,25 +995,28 @@ impl<'a> OtContext<'a> {
         Self::callback(instance).plat_ipv6_received(msg);
     }
 
-    // /// caller must call this prior to setting up the host config
-    // #[cfg(feature = "srp")]
-    // pub fn set_srp_state_callback(
-    //     &mut self,
-    //     callback: Option<&'a mut (dyn FnMut(otError, usize, usize, usize) + Send)>,
-    // ) {
-    //     critical_section::with(|cs| {
-    //         let mut srp_change_callback = SRP_CHANGE_CALLBACK.borrow_ref_mut(cs);
-    //         *srp_change_callback = unsafe { core::mem::transmute(callback) };
-    //     });
+    #[cfg(feature = "srp")]
+    unsafe extern "C" fn plat_c_srp_state_change_callback(
+        _error: otError,
+        _host_info: *const crate::sys::otSrpClientHostInfo,
+        _services: *const crate::sys::otSrpClientService,
+        _removed_services: *const crate::sys::otSrpClientService,
+        context: *mut c_void,
+    ) {
+        let instance = context as *mut otInstance;
 
-    //     unsafe {
-    //         otSrpClientSetCallback(
-    //             self.instance,
-    //             Some(srp_state_callback),
-    //             core::ptr::null_mut(),
-    //         )
-    //     }
-    // }
+        Self::callback(instance).plat_changed(0);
+    }
+
+    #[cfg(feature = "srp")]
+    unsafe extern "C" fn plat_c_srp_auto_start_callback(
+        _server_sock_addr: *const crate::sys::otSockAddr,
+        context: *mut c_void,
+    ) {
+        let instance = context as *mut otInstance;
+
+        Self::callback(instance).plat_changed(0);
+    }
 
     //
     // All `plat_*` methods below represent the OpenThread C library calling us back.

@@ -26,7 +26,7 @@ use crate::sys::{
     otSrpClientSetHostName, otSrpClientSetKeyLeaseInterval, otSrpClientSetLeaseInterval,
     otSrpClientSetTtl, otSrpClientStart, otSrpClientStop,
 };
-use crate::{ot, to_ot_addr, to_sock_addr, OpenThread, OtError};
+use crate::{ot, to_ot_addr, to_sock_addr, OpenThread, OtContext, OtError};
 
 pub struct SrpServiceId(usize, PhantomData<*const ()>);
 
@@ -155,6 +155,16 @@ pub struct SrpConf<'a> {
 }
 
 impl<'a> SrpConf<'a> {
+    pub const fn new() -> Self {
+        Self {
+            host_name: "ot-device",
+            host_addrs: &[],
+            ttl: 60,
+            default_lease_secs: 0,
+            default_key_lease_secs: 0,
+        }
+    }
+
     fn store(&self, ot_srp: &mut otSrpClientHostInfo, buf: &mut [u8]) -> Result<(), OtError> {
         let mut offset = 0;
 
@@ -172,6 +182,12 @@ impl<'a> SrpConf<'a> {
         ot_srp.mAutoAddress = addrs.is_empty();
 
         Ok(())
+    }
+}
+
+impl Default for SrpConf<'_> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -397,7 +413,11 @@ impl OpenThread<'_> {
         let instance = ot.state().ot.instance;
 
         unsafe {
-            otSrpClientEnableAutoStartMode(instance, None, core::ptr::null_mut());
+            otSrpClientEnableAutoStartMode(
+                instance,
+                Some(OtContext::plat_c_srp_auto_start_callback),
+                instance as _,
+            );
         }
     }
 

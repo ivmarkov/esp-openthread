@@ -8,7 +8,8 @@ use embassy_net_driver_channel::{driver::HardwareAddress, RxRunner, TxRunner};
 use crate::{OpenThread, Radio};
 
 pub use embassy_net_driver_channel::{
-    driver::LinkState as EnetLinkState, Device as EnetDriver, State as EnetDriverState, StateRunner as EnetStateRunner,
+    driver::LinkState as EnetLinkState, Device as EnetDriver, State as EnetDriverState,
+    StateRunner as EnetStateRunner,
 };
 
 /// Create a new OpenThread driver for `embassy-net`, by internally instantiating the `openthread` API types
@@ -31,7 +32,11 @@ pub use embassy_net_driver_channel::{
 pub fn new<'d, const MTU: usize, const N_RX: usize, const N_TX: usize>(
     ot: OpenThread<'d>,
     state: &'d mut EnetDriverState<MTU, N_RX, N_TX>,
-) -> (EnetStateRunner<'d>, EnetRunner<'d, MTU>, EnetDriver<'d, MTU>) {
+) -> (
+    EnetStateRunner<'d>,
+    EnetRunner<'d, MTU>,
+    EnetDriver<'d, MTU>,
+) {
     let (runner, device) = embassy_net_driver_channel::new(state, HardwareAddress::Ip);
 
     let (state_runner, rx_runner, tx_runner) = runner.split();
