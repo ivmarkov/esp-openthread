@@ -450,7 +450,7 @@ impl<'a> OpenThread<'a> {
                 continue;
             };
 
-            debug!("Got trigger alarm request: {when}, waiting for it to trigger");
+            trace!("Got trigger alarm request: {when}, waiting for it to trigger");
 
             loop {
                 let result =
@@ -459,7 +459,7 @@ impl<'a> OpenThread<'a> {
                 match result {
                     Either::First(new_when) => {
                         if let Some(new_when) = new_when {
-                            debug!("Alarm interrupted by new alarm: {new_when}");
+                            trace!("Alarm interrupted by a new alarm: {new_when}");
                             when = new_when;
                         } else {
                             debug!("Alarm cancelled");
@@ -467,7 +467,6 @@ impl<'a> OpenThread<'a> {
                         }
                     }
                     Either::Second(_) => {
-                        // TODO: Rather than signalling the OT spin loop, notify OT directly?
                         debug!("Alarm triggered, notifying OT main loop");
 
                         {
@@ -497,20 +496,17 @@ impl<'a> OpenThread<'a> {
         loop {
             trace!("Waiting for radio command");
 
-            let (mut cmd, mut conf) = radio_cmd().await;
+            let mut cmd = radio_cmd().await;
             debug!("Got radio command: {cmd:?}");
 
             // TODO: Borrow it from the resources
             let mut psdu_buf = [0_u8; OT_RADIO_FRAME_MAX_SIZE as usize];
 
             loop {
-                // TODO: Only do this if the conf changed
-                debug!("Setting radio config: {conf:?}");
-                let _ = radio.set_config(&conf).await;
+                radio.set_config(cmd.conf()).await.unwrap();
 
                 match cmd {
-                    RadioCommand::Conf => break,
-                    RadioCommand::Tx => {
+                    RadioCommand::Tx(_) => {
                         let psdu_len = {
                             let mut ot = self.activate();
                             let state = ot.state();
@@ -537,7 +533,7 @@ impl<'a> OpenThread<'a> {
                         let result = embassy_futures::select::select(&mut new_cmd, &mut tx).await;
 
                         match result {
-                            Either::First((new_cmd, new_conf)) => {
+                            Either::First(new_cmd) => {
                                 let mut ot = self.activate();
                                 let state = ot.state();
 
@@ -555,7 +551,6 @@ impl<'a> OpenThread<'a> {
                                 debug!("Tx interrupted by new command: {new_cmd:?}");
 
                                 cmd = new_cmd;
-                                conf = new_conf;
                             }
                             Either::Second(result) => {
                                 let mut ot = self.activate();
@@ -580,18 +575,18 @@ impl<'a> OpenThread<'a> {
                             }
                         }
                     }
-                    RadioCommand::Rx(channel) => {
-                        trace!("Waiting for Rx on channel {channel}");
+                    RadioCommand::Rx(_) => {
+                        trace!("Waiting for Rx");
 
                         let result = {
                             let mut new_cmd = pin!(radio_cmd());
-                            let mut rx = pin!(radio.receive(channel, &mut psdu_buf));
+                            let mut rx = pin!(radio.receive(&mut psdu_buf));
 
                             embassy_futures::select::select(&mut new_cmd, &mut rx).await
                         };
 
                         match result {
-                            Either::First((new_cmd, new_conf)) => {
+                            Either::First(new_cmd) => {
                                 let mut ot = self.activate();
                                 let state = ot.state();
 
@@ -608,7 +603,6 @@ impl<'a> OpenThread<'a> {
                                 debug!("Rx interrupted by new command: {new_cmd:?}");
 
                                 cmd = new_cmd;
-                                conf = new_conf;
                             }
                             Either::Second(result) => {
                                 // https://github.com/espressif/esp-idf/blob/release/v5.3/components/ieee802154/private_include/esp_ieee802154_frame.h#L20
@@ -684,7 +678,7 @@ impl<'a> OpenThread<'a> {
 
                                         rcv_frame.mLength = rcv_psdu.len() as u16;
                                         rcv_frame.mRadioType = 1; // ????
-                                        rcv_frame.mChannel = channel;
+                                        rcv_frame.mChannel = psdu_meta.channel;
                                         rcv_frame.mInfo.mRxInfo.mRssi = rssi;
                                         rcv_frame.mInfo.mRxInfo.mLqi = rssi_to_lqi(rssi);
                                         rcv_frame.mInfo.mRxInfo.mTimestamp =
@@ -840,6 +834,7 @@ struct OtActiveState<'a> {
     /// The activated `OtUdpState` instance.
     #[cfg(feature = "udp")]
     udp: Option<RefMut<'a, OtUdpState<'static>>>,
+    /// The activated `OtSrpState` instance.
     #[cfg(feature = "srp")]
     srp: Option<RefMut<'a, OtSrpState<'static>>>,
 }
@@ -1155,9 +1150,6 @@ impl<'a> OtContext<'a> {
 
         if state.ot.radio_conf.promiscuous != promiscuous {
             state.ot.radio_conf.promiscuous = promiscuous;
-
-            let conf = state.ot.radio_conf.clone();
-            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1168,9 +1160,6 @@ impl<'a> OtContext<'a> {
 
         if state.ot.radio_conf.ext_addr != Some(address) {
             state.ot.radio_conf.ext_addr = Some(address);
-
-            let conf = state.ot.radio_conf.clone();
-            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1181,9 +1170,6 @@ impl<'a> OtContext<'a> {
 
         if state.ot.radio_conf.short_addr != Some(address) {
             state.ot.radio_conf.short_addr = Some(address);
-
-            let conf = state.ot.radio_conf.clone();
-            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1194,9 +1180,6 @@ impl<'a> OtContext<'a> {
 
         if state.ot.radio_conf.pan_id != Some(pan_id) {
             state.ot.radio_conf.pan_id = Some(pan_id);
-
-            let conf = state.ot.radio_conf.clone();
-            state.ot.radio.signal((RadioCommand::Conf, conf));
         }
     }
 
@@ -1232,8 +1215,9 @@ impl<'a> OtContext<'a> {
         state.ot.radio_resources.snd_frame.mPsdu =
             addr_of_mut!(state.ot.radio_resources.snd_psdu) as *mut _;
 
-        let conf = state.ot.radio_conf.clone();
-        state.ot.radio.signal((RadioCommand::Tx, conf));
+        let mut conf = state.ot.radio_conf.clone();
+        conf.channel = frame.mChannel;
+        state.ot.radio.signal(RadioCommand::Tx(conf));
 
         Ok(())
     }
@@ -1243,8 +1227,9 @@ impl<'a> OtContext<'a> {
 
         let state = self.state();
 
-        let conf = state.ot.radio_conf.clone();
-        state.ot.radio.signal((RadioCommand::Rx(channel), conf));
+        let mut conf = state.ot.radio_conf.clone();
+        conf.channel = channel;
+        state.ot.radio.signal(RadioCommand::Rx(conf));
 
         Ok(())
     }
@@ -1280,8 +1265,8 @@ struct OtState<'a> {
     tasklets: Signal<()>,
     /// The OpenThread state has changed. Set by the OpenThread C library via the `otPlatStateChanged` callback
     changes: Signal<()>,
-    /// The radio needs to execute the provided command, in the context of the provided configuration.
-    radio: Signal<(RadioCommand, radio::Config)>,
+    /// The radio needs to execute the provided command
+    radio: Signal<RadioCommand>,
     /// The latest radio configuration from the POV of OpenThread
     radio_conf: radio::Config,
     /// Resources for the radio (PHY data frames and their descriptors)
@@ -1293,18 +1278,24 @@ struct OtState<'a> {
 /// A command for the radio runner to process.
 #[derive(Debug)]
 enum RadioCommand {
-    /// (Re)configure the radio
-    Conf,
-    /// Transmit a frame
+    /// Transmit a frame with the provided configuration
     /// The data of the frame is in `OtData::radio_resources.snd_frame` and `OtData::radio_resources.snd_psdu`
     ///
     /// Once the frame is sent (or an error occurs) OpenThread C will be signalled by calling `otPlatRadioTxDone`
-    Tx,
-    /// Receive a frame on a specific channel
+    Tx(Config),
+    /// Receive a frame with the provided configuration
     ///
     /// Once the frame is received, it will be copied to `OtData::radio_resources.rcv_frame` and `OtData::radio_resources.rcv_psdu`
     /// and OpenThread C will be signalled by calling `otPlatRadioReceiveDone`
-    Rx(u8),
+    Rx(Config),
+}
+
+impl RadioCommand {
+    const fn conf(&self) -> &Config {
+        match self {
+            Self::Tx(conf) | Self::Rx(conf) => conf,
+        }
+    }
 }
 
 /// Radio-related OpenThread C data carriers

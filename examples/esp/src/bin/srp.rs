@@ -24,8 +24,8 @@ use log::info;
 
 use openthread::esp::EspRadio;
 use openthread::{
-    OpenThread, OperationalDataset, OtResources, OtSrpResources, OtUdpResources, SrpConf, ThreadTimestamp,
-    UdpSocket,
+    OpenThread, OperationalDataset, OtResources, OtSrpResources, OtUdpResources, SrpConf,
+    ThreadTimestamp, UdpSocket,
 };
 
 macro_rules! mk_static {
@@ -69,7 +69,8 @@ async fn main(spawner: Spawner) {
     let ot_srp_resources =
         mk_static!(OtSrpResources<SRP_MAX_SERVICES, SRP_SERVICE_BUF>, OtSrpResources::new());
 
-    let ot = OpenThread::new_with_udp_srp(rng, ot_resources, ot_udp_resources, ot_srp_resources).unwrap();
+    let ot = OpenThread::new_with_udp_srp(rng, ot_resources, ot_udp_resources, ot_srp_resources)
+        .unwrap();
 
     spawner
         .spawn(run_ot(
