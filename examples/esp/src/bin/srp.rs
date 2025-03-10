@@ -1,6 +1,6 @@
 //! An example for esp32-c6 and esp32-h2, demonstrating the usage of OpenThread native UDP sockets as well as the SRP API.
 //!
-//! The example provisions a MTD device with fixed Thread network settings, waits for the device to connect,
+//! The example provisions an MTD device with fixed Thread network settings, waits for the device to connect,
 //! and then sends and receives Ipv6 UDP packets over the `IEEE 802.15.4` radio.
 //!
 //! The example also registers the MTD device under the hostname `srp-example` and should thus be pingable as `srp-example.local`

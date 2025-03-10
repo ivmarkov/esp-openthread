@@ -1,9 +1,9 @@
-//! Basic example for esp32-c6 and esp32-h2, demonstrating the usage of OpenThread native UDP sockets.
+//! Basic example for NRF, demonstrating the usage of OpenThread native UDP sockets.
 //!
 //! The example provisions an MTD device with fixed Thread network settings, waits for the device to connect,
 //! and then sends and receives Ipv6 UDP packets over the `IEEE 802.15.4` radio.
 //!
-//! See README.md for instructions on how to configure the other Thread peer (a FTD), using another Esp device.
+//! See README.md for instructions on how to configure the other Thread peer (a FTD), using an Esp device.
 
 #![no_std]
 #![no_main]
@@ -12,17 +12,20 @@ use core::net::{Ipv6Addr, SocketAddrV6};
 
 use embassy_executor::Spawner;
 
-use esp_backtrace as _;
-use esp_hal::rng::Rng;
-use esp_hal::timer::systimer::SystemTimer;
-use esp_ieee802154::Ieee802154;
+use embassy_nrf::peripherals::{RADIO, RNG};
+use embassy_nrf::rng::{self, Rng};
+use embassy_nrf::{bind_interrupts, peripherals, radio};
 
 use log::info;
 
-use openthread::esp::EspRadio;
+use {panic_probe as _, rtt_target as _};
+
+use openthread::nrf::{Ieee802154, NrfRadio};
 use openthread::{
     OpenThread, OperationalDataset, OtResources, OtUdpResources, ThreadTimestamp, UdpSocket,
 };
+
+use tinyrlibc as _;
 
 macro_rules! mk_static {
     ($t:ty) => {{
@@ -39,22 +42,23 @@ macro_rules! mk_static {
     }};
 }
 
+bind_interrupts!(struct Irqs {
+    RADIO => radio::InterruptHandler<peripherals::RADIO>;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
+});
+
 const BOUND_PORT: u16 = 1212;
 
 const UDP_SOCKETS_BUF: usize = 1280;
 const UDP_MAX_SOCKETS: usize = 2;
 
-#[esp_hal_embassy::main]
+#[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    esp_println::logger::init_logger(log::LevelFilter::Info);
+    let p = embassy_nrf::init(Default::default());
 
     info!("Starting...");
 
-    let peripherals = esp_hal::init(esp_hal::Config::default());
-
-    esp_hal_embassy::init(SystemTimer::new(peripherals.SYSTIMER).alarm0);
-
-    let rng = mk_static!(Rng, Rng::new(peripherals.RNG));
+    let rng = mk_static!(Rng<RNG>, Rng::new(p.RNG, Irqs));
 
     let ot_resources = mk_static!(OtResources, OtResources::new());
     let ot_udp_resources =
@@ -63,13 +67,7 @@ async fn main(spawner: Spawner) {
     let ot = OpenThread::new_with_udp(rng, ot_resources, ot_udp_resources).unwrap();
 
     spawner
-        .spawn(run_ot(
-            ot,
-            EspRadio::new(Ieee802154::new(
-                peripherals.IEEE802154,
-                peripherals.RADIO_CLK,
-            )),
-        ))
+        .spawn(run_ot(ot, NrfRadio::new(Ieee802154::new(p.RADIO, Irqs))))
         .unwrap();
 
     spawner.spawn(run_ot_ip_info(ot)).unwrap();
@@ -118,7 +116,7 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn run_ot(ot: OpenThread<'static>, radio: EspRadio<'static>) -> ! {
+async fn run_ot(ot: OpenThread<'static>, radio: NrfRadio<'static, RADIO>) -> ! {
     ot.run(radio).await
 }
 

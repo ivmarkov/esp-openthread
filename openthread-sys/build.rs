@@ -66,7 +66,7 @@ fn main() -> Result<()> {
         println!("cargo:rustc-link-lib=openthread-platform-utils-static");
         println!("cargo:rustc-link-lib=openthread-platform");
         println!("cargo:rustc-link-lib=p256m");
-        println!("cargo:rustc-link-lib=platform");
+        //println!("cargo:rustc-link-lib=platform");
         println!("cargo:rustc-link-lib=tcplp-mtd");
         println!("cargo:rustc-link-search={}", libs_dir.display());
     }
