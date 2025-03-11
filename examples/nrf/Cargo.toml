@@ -29,7 +29,7 @@ embassy-futures = "0.1"
 embassy-time = { version = "0.4", features = ["log"] }
 embassy-net = { version = "0.6", features = ["log", "proto-ipv6", "medium-ip", "udp"] }
 embassy-nrf = { version = "0.3", features = ["log", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time"] }
-tinyrlibc = { version = "0.5", features = ["strstr", "strcmp", "isupper"] }
+tinyrlibc = { version = "0.5", default-features = false, features = ["strstr", "strcmp", "isupper"] }
 log = "0.4"
 heapless = "0.8"
 critical-section = "1.1"
