@@ -9,18 +9,42 @@ Platform-agnostic, async Rust bindings for the [`OpenThread`](https://openthread
 
 Tailored for Rust embedded baremetal.
 
+The [crate](openthread) does not depend on any platform features and only needs an implementation of a single trait - [`Radio`](openthread/src/radio.rs) - that represents the IEEE 802.15.4 PHY radio. 
+The radio might be located on the same die, or the user might provide an implementation that communicates with the actual radio over UART, SPI, USB, etc.
+
+Two IEEE 802.15.4 radios are supported out of the box:
+- The ESP32C6 and ESP32H2 radio (enable the `esp-ieee802154` feature; see [examples](examples/esp));
+- The NRF radio (enable the `embasy-nrf` feature; see [examples](examples/nrf)).
+
+## Build
+
 For certain MCUs / Rust targets, the OpenThread libraries are pre-compiled for convenience.
-Current list:
+Current list (might be extended upon request):
 - `riscv32imac-unknown-none-elf` (ESP32C6 and ESP32H2)
 - `riscv32imc-unknown-none-elf`
 - `thumbv6m-none-eabi`
 - `thumbv7em-none-eabi` - WIP - for NRF52
 
-For targets where pre-compiled libs are not available yet (including for the Host itself), a standard `build.rs` build is also supported.
+**For these targets you only need `rustc`/`cargo` as usual!**
+
+Small caveat: since `openthread` does a few calls into the C standard library (primarily `str*` functions), at link time, it is up to the user to poly-fill the `str*` syscalls - [either with the MCU ROM functions](examples/esp/.cargo/config.toml), or by [depending](examples/nrf/Cargo.toml) on [`tinyrlibc`](https://github.com/rust-embedded-community/tinyrlibc), or with both.
+
+### Build for other targets / custom build
+
+For targets where pre-compiled libs are not available (including for the Host itself), a standard `build.rs` build is also supported.
 For the on-the-fly OpenThread CMake build to work, you'll need to install and set in your `$PATH`:
-- The GCC toolchain correspponding to your Rust target, with working `foo-bar-gcc -print-sysroot` command
-- Recent Clang
-- cmake amd ninja
+- The GCC toolchain correspponding to your Rust target, with **working** `foo-bar-gcc -print-sysroot` command
+- Recent Clang (for Espressif `xtensa`, [it must be the Espressif fork](https://crates.io/crates/espup), but for all other chips, the stock Clang would work)
+- CMake and Ninja
+
+As per above, since `openthread` does a few calls into the C standard library (primarily `str*` functions), the GCC toolchain needs to have the `newlib` (or other libc headers for e.g. non-embedded scenarios) in its sysroot, which is usually the case anyway. `newlib` however is only used _at compile-time_ on baremetal targets (for a few libc headers) and not linked-in.
+
+Examples of GCC toolchains that are known to work fine:
+- For ARM (Cortex M CPUs and others) - the [ARM GNU toolchain](https://developer.arm.com/Tools%20and%20Software/GNU%20Toolchain);
+  - Note that the Ubuntu `arm-none-eabi-gcc` system package does **NOT** work, as it does not print a sysroot, i.e. `arm-none-eabi-gcc -print-sysroot` returns an empty response, and furthermore, the `newlib` headers are installed in a separate location from the arch headers;
+- For RISCV - the [Espressif RISCV toolchain](https://github.com/espressif/crosstool-NG/releases). The ["official" RISCV GNU toolchain](https://github.com/riscv-collab/riscv-gnu-toolchain) should also work;
+- For xtensa (Espressif ESP32 and ESP32SXX MCUs) - the [Espressif xtensa toolchain](https://github.com/espressif/crosstool-NG/releases);
+- For the Host machine (non-embedded) - your pre-installed toolchain would work just fine.
 
 ## Features
 
