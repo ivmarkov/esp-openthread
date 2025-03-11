@@ -28,6 +28,8 @@ use openthread::{OpenThread, OperationalDataset, OtResources, ThreadTimestamp};
 
 use rand_core::RngCore;
 
+use tinyrlibc as _;
+
 macro_rules! mk_static {
     ($t:ty) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();

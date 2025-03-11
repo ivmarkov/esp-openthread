@@ -21,9 +21,7 @@ Two IEEE 802.15.4 radios are supported out of the box:
 For certain MCUs / Rust targets, the OpenThread libraries are pre-compiled for convenience.
 Current list (might be extended upon request):
 - `riscv32imac-unknown-none-elf` (ESP32C6 and ESP32H2)
-- `riscv32imc-unknown-none-elf`
-- `thumbv6m-none-eabi`
-- `thumbv7em-none-eabi` - WIP - for NRF52
+- `thumbv7em-none-eabi` (NRF52)
 
 **For these targets you only need `rustc`/`cargo` as usual!**
 

@@ -40,7 +40,7 @@ impl OpenThreadBuilder {
     ) -> Self {
         Self {
             cmake_configurer: CMakeConfigurer::new(
-                crate_root_path.join("openthread"),
+                crate_root_path.clone(),
                 cmake_rust_target,
                 cmake_host_rust_target,
                 force_esp_riscv_toolchain,
@@ -171,24 +171,22 @@ impl OpenThreadBuilder {
         let mut config = self.cmake_configurer.configure(Some(lib_dir));
 
         config
-            .define("OT_LOG_LEVEL", "NONE")
-            // Commented out as it needs `vsnprintf`
-            //.define("OT_LOG_LEVEL", "DEBG")
-            .define("OT_LOG_OUTPUT", "PLATFORM_DEFINED")
+            .define("OT_LOG_LEVEL", "DEBG")
             .define("OT_FTD", "OFF")
             .define("OT_MTD", "ON")
             .define("OT_RCP", "OFF")
-            // Disabled for now as it needs `vsnprintf`
             .define("OT_TCP", "OFF")
             .define("OT_APP_CLI", "OFF")
             .define("OT_APP_NCP", "OFF")
             .define("OT_APP_RCP", "OFF")
-            .define("OT_PLATFORM", "external")
-            .define("OT_SLAAC", "ON")
-            .define("OT_SETTINGS_RAM", "ON")
             .define("OT_SRP_CLIENT", "ON")
+            .define("OT_SLAAC", "ON")
             .define("OT_ECDSA", "ON")
             .define("OT_PING_SENDER", "ON")
+            // Do not change from here below
+            .define("OT_LOG_OUTPUT", "PLATFORM_DEFINED")
+            .define("OT_PLATFORM", "external")
+            .define("OT_SETTINGS_RAM", "ON")
             //.define("OT_COMPILE_WARNING_AS_ERROR", "ON "$@" "${OT_SRCDIR}"")
             // ... or else the build would fail with `arm-none-eabi-gcc` during the linking phase
             // with "undefined symbol `__exit`" error

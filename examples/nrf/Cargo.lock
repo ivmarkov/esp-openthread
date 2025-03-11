@@ -1061,7 +1061,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d07d242693682e46801cb0186c583858bce022f698401b3f04bbd729c9a87e7"
 dependencies = [
  "cc",
- "portable-atomic",
 ]
 
 [[package]]
