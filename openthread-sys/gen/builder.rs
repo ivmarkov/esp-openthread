@@ -171,11 +171,15 @@ impl OpenThreadBuilder {
         let mut config = self.cmake_configurer.configure(Some(lib_dir));
 
         config
-            .define("OT_LOG_LEVEL", "DEBG")
+            .define("OT_LOG_LEVEL", "NONE")
+            // Commented out as it needs `vsnprintf`
+            //.define("OT_LOG_LEVEL", "DEBG")
             .define("OT_LOG_OUTPUT", "PLATFORM_DEFINED")
             .define("OT_FTD", "OFF")
             .define("OT_MTD", "ON")
             .define("OT_RCP", "OFF")
+            // Disabled for now as it needs `vsnprintf`
+            .define("OT_TCP", "OFF")
             .define("OT_APP_CLI", "OFF")
             .define("OT_APP_NCP", "OFF")
             .define("OT_APP_RCP", "OFF")
