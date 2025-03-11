@@ -48,24 +48,23 @@ Examples of GCC toolchains that are known to work fine:
 
 ## Features
 
-- MTD functionality
-- Integration with `embassy-net` and `edge-nal`
-- Out of the box support for ESP32C6 and ESP32H2, with pre-compiled binaries and the IEEE 802.15.4 radio provided by the `esp-hal` project
+- MTD (Minimal Thread Device) functionality
+- Optional integration with [`embassy-net`]() and [`edge-nal`]()
+- Out of the box support for the IEEE 802.15.4 radio in [Espressif](openthread/src/esp.rs) and [Nordic Semiconductor](openthread/src/nrf.rs) chips
 
 ## Next
 
-- Out of the box support for NRF52, with pre-compiled binaries and the IEEE 802.15.4 radio provided by the `embassy-nrf` project
 - Sleepy end-device
-- FTD functionality
+- FTD (Full Thread Device) functionality
 
 ## Non-Goals
 
-- BR functionality
+- Thread Border Router functionality
 
 ## Status
 
-The examples (native OpenThread UDP sockets; `embassy-net` integration; SRP) build and run on Espressif MCUs.
-The code is not completely tested yet though.
+The examples (native OpenThread UDP sockets; `embassy-net` integration; SRP) build and run on Espressif MCUs, with testing for NRF pending.
+The SRP code is not completely tested yet though.
 
 ## Testing
 
