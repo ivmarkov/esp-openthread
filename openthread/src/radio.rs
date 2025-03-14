@@ -82,7 +82,7 @@ pub enum Cca {
 }
 
 bitflags! {
-    /// Radio capabilities.
+    /// Radio PHY capabilities.
     #[repr(transparent)]
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Capabilities: u16 {
@@ -96,7 +96,7 @@ bitflags! {
 }
 
 bitflags! {
-    /// Radio capabilities.
+    /// Radio MAC capabilities.
     #[repr(transparent)]
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MacCapabilities: u16 {
