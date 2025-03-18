@@ -516,7 +516,7 @@ impl OpenThread<'_> {
             default_key_lease_secs: unsafe { otSrpClientGetKeyLeaseInterval(instance) },
         };
 
-        f(&conf, info.mState.into(), srp.conf_taken)
+        f(&conf, info.mState.into(), !srp.conf_taken)
     }
 
     /// Return `true` if there is neither host, nor any service currently registered with the SRP client.
@@ -545,6 +545,16 @@ impl OpenThread<'_> {
             Err(OtError::new(otError_OT_ERROR_INVALID_STATE))?;
         }
 
+        unsafe {
+            otSrpClientSetLeaseInterval(instance, conf.default_lease_secs);
+        }
+        unsafe {
+            otSrpClientSetKeyLeaseInterval(instance, conf.default_key_lease_secs);
+        }
+        unsafe {
+            otSrpClientSetTtl(instance, conf.ttl);
+        }
+
         let mut srp_conf = otSrpClientHostInfo {
             mName: core::ptr::null(),
             mAddresses: core::ptr::null(),
@@ -554,6 +564,7 @@ impl OpenThread<'_> {
         };
 
         conf.store(&mut srp_conf, srp.conf)?;
+        srp.conf_taken = true;
 
         ot!(unsafe { otSrpClientSetHostName(instance, srp_conf.mName) })?;
 
@@ -563,16 +574,6 @@ impl OpenThread<'_> {
             })?;
         } else {
             ot!(unsafe { otSrpClientEnableAutoHostAddress(instance) })?;
-        }
-
-        unsafe {
-            otSrpClientSetLeaseInterval(instance, conf.default_lease_secs);
-        }
-        unsafe {
-            otSrpClientSetKeyLeaseInterval(instance, conf.default_key_lease_secs);
-        }
-        unsafe {
-            otSrpClientSetTtl(instance, conf.ttl);
         }
 
         Ok(())
