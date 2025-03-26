@@ -969,7 +969,7 @@ impl OtActiveState<'_> {
         let udp = self
             .udp
             .as_mut()
-            .ok_or(OtError::new(otError_OT_ERROR_FAILED))?;
+            .ok_or(OtError::new(crate::sys::otError_OT_ERROR_FAILED))?;
 
         Ok(udp)
     }
@@ -983,7 +983,7 @@ impl OtActiveState<'_> {
         let srp = self
             .srp
             .as_mut()
-            .ok_or(OtError::new(otError_OT_ERROR_FAILED))?;
+            .ok_or(OtError::new(crate::sys::otError_OT_ERROR_FAILED))?;
 
         Ok(srp)
     }
