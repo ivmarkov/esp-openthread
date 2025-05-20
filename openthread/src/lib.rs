@@ -1,7 +1,9 @@
 //! A safe API for OpenThread (`openthread-sys`)
 
 #![no_std]
+#![allow(unknown_lints)]
 #![allow(async_fn_in_trait)]
+#![allow(clippy::uninlined_format_args)]
 
 use core::cell::{RefCell, RefMut};
 use core::ffi::c_void;
@@ -620,12 +622,12 @@ impl<'a> OpenThread<'a> {
                             trace!("Alarm interrupted by a new alarm: {}", new_when);
                             when = new_when;
                         } else {
-                            debug!("Alarm cancelled");
+                            trace!("Alarm cancelled");
                             break;
                         }
                     }
                     Either::Second(_) => {
-                        debug!("Alarm triggered, notifying OT main loop");
+                        trace!("Alarm triggered, notifying OT main loop");
 
                         {
                             let mut ot = self.activate();
@@ -696,7 +698,7 @@ impl<'a> OpenThread<'a> {
             trace!("Waiting for radio command");
 
             let mut cmd = radio_cmd().await;
-            debug!("Got radio command: {:?}", cmd);
+            trace!("Got radio command: {:?}", cmd);
 
             // TODO: Borrow it from the resources
             let mut psdu_buf = [0_u8; OT_RADIO_FRAME_MAX_SIZE as usize];
@@ -755,7 +757,7 @@ impl<'a> OpenThread<'a> {
                                     );
                                 }
 
-                                debug!("Tx interrupted by new command: {:?}", new_cmd);
+                                trace!("Tx interrupted by new command: {:?}", new_cmd);
 
                                 cmd = new_cmd;
                             }
@@ -766,7 +768,7 @@ impl<'a> OpenThread<'a> {
 
                                 match result {
                                     Ok(maybe_ack_psdu_meta) => {
-                                        debug!("Tx done, ack frame: {:?}", maybe_ack_psdu_meta);
+                                        trace!("Tx done, ack frame: {:?}", maybe_ack_psdu_meta);
 
                                         let ack_frame_ptr =
                                             if let Some(ack_psdu_meta) = maybe_ack_psdu_meta {
@@ -794,7 +796,7 @@ impl<'a> OpenThread<'a> {
                                         }
                                     }
                                     Err(err) => {
-                                        debug!("Tx failed: {:?}", err);
+                                        trace!("Tx failed: {:?}", err);
 
                                         unsafe {
                                             otPlatRadioTxDone(
@@ -823,7 +825,7 @@ impl<'a> OpenThread<'a> {
 
                         match result {
                             Either::First(new_cmd) => {
-                                debug!("Rx interrupted by new command: {:?}", new_cmd);
+                                trace!("Rx interrupted by new command: {:?}", new_cmd);
 
                                 cmd = new_cmd;
                             }
@@ -835,7 +837,7 @@ impl<'a> OpenThread<'a> {
                                     Ok(rcv_psdu_meta) => {
                                         let rcv_psdu = &psdu_buf[..rcv_psdu_meta.len];
 
-                                        debug!(
+                                        trace!(
                                             "Rx done, got frame: {:?}, {}",
                                             rcv_psdu_meta,
                                             Bytes(rcv_psdu)
@@ -860,7 +862,7 @@ impl<'a> OpenThread<'a> {
                                         }
                                     }
                                     Err(err) => {
-                                        debug!("Rx failed: {:?}", err);
+                                        trace!("Rx failed: {:?}", err);
 
                                         // Reporting receive failure because we got a driver error
                                         unsafe {
@@ -1250,7 +1252,7 @@ impl<'a> OtContext<'a> {
             if res != otError_OT_ERROR_DROP {
                 ot!(res)?;
 
-                debug!("Transmitted IPv6 packet: {}", Bytes(packet));
+                trace!("Transmitted IPv6 packet: {}", Bytes(packet));
             } else {
                 // OpenThread will intentionally drop some multicast and ICMPv6 packets
                 // which are not required for the Thread network.

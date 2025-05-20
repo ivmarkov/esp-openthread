@@ -113,7 +113,7 @@ impl Radio for EspRadio<'_> {
     ) -> Result<Option<PsduMeta>, Self::Error> {
         TX_SIGNAL.reset();
 
-        debug!(
+        trace!(
             "ESP Radio, about to transmit: {} on channel {}",
             Bytes(psdu),
             self.config.channel
@@ -149,7 +149,7 @@ impl Radio for EspRadio<'_> {
         let psdu_len = (raw.data.len() - 1).min((raw.data[0] & 0x7f) as usize);
         psdu_buf[..psdu_len].copy_from_slice(&raw.data[1..][..psdu_len]);
 
-        debug!(
+        trace!(
             "ESP Radio, received: {} on channel {}",
             Bytes(&psdu_buf[..psdu_len]),
             raw.channel
