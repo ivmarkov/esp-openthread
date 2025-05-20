@@ -783,7 +783,7 @@ impl Radio for ProxyRadio<'_> {
             req.psdu.clear();
             unwrap!(req.psdu.extend_from_slice(psdu));
 
-            debug!("ProxyRadio, transmit request sent: {:?}", req);
+            trace!("ProxyRadio, transmit request sent: {:?}", req);
 
             self.request.send_done();
         }
@@ -800,7 +800,7 @@ impl Radio for ProxyRadio<'_> {
 
         let resp = self.response.receive().await;
 
-        debug!("ProxyRadio, transmit response received: {:?}", resp);
+        trace!("ProxyRadio, transmit response received: {:?}", resp);
 
         let psdu_meta = (ack_psdu_buf.is_some() && !resp.psdu.is_empty()).then_some(PsduMeta {
             len: resp.psdu.len(),
@@ -838,7 +838,7 @@ impl Radio for ProxyRadio<'_> {
             req.config = self.config.clone();
             req.psdu.clear();
 
-            debug!("ProxyRadio, receive request sent: {:?}", req);
+            trace!("ProxyRadio, receive request sent: {:?}", req);
 
             self.request.send_done();
         }
@@ -855,7 +855,7 @@ impl Radio for ProxyRadio<'_> {
 
         let resp = self.response.receive().await;
 
-        debug!("ProxyRadio, receive response received: {:?}", resp);
+        trace!("ProxyRadio, receive response received: {:?}", resp);
 
         match resp.result {
             Ok(()) => {
@@ -1003,7 +1003,7 @@ impl PhyRadioRunner<'_> {
 
         response.result = result;
 
-        debug!("PhyRadioRunner, processed response: {:?}", response);
+        trace!("PhyRadioRunner, processed response: {:?}", response);
 
         response_sender.send_done();
 

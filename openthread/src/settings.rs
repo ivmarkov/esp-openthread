@@ -327,7 +327,7 @@ where
         index: usize,
         buf: &mut [u8],
     ) -> Result<Option<usize>, SettingsError> {
-        debug!("Getting key: {}, index: {}", key, index);
+        trace!("Getting key: {}, index: {}", key, index);
 
         let for_key = self.iter().filter(|setting| setting.0 == key);
         let setting = for_key
@@ -339,7 +339,7 @@ where
             let len = setting.1.len().min(buf.len());
             buf[..len].copy_from_slice(setting.1);
 
-            debug!(
+            trace!(
                 "Got key: {}, index: {}, value: {}",
                 key,
                 index,
@@ -347,7 +347,7 @@ where
             );
             Ok(Some(len))
         } else {
-            debug!("Key not found: {}, index: {}", key, index);
+            trace!("Key not found: {}, index: {}", key, index);
             Ok(None)
         }
     }
@@ -366,7 +366,7 @@ where
     /// - `Ok(())`: The setting was added
     /// - `Err(_)`: An error occurred, like out of storage space
     pub fn add(&mut self, key: u16, value: &[u8]) -> Result<(), SettingsError> {
-        debug!("Adding key: {}, value: {}", key, Bytes(value));
+        trace!("Adding key: {}, value: {}", key, Bytes(value));
 
         let len = RamSetting::HDR_LEN + value.len();
         if self.buffer.len() - self.len < len {
@@ -390,7 +390,7 @@ where
             self.changed_signal.signal(());
         }
 
-        debug!("Added key: {}", key);
+        trace!("Added key: {}", key);
         Ok(())
     }
 
@@ -407,7 +407,7 @@ where
     /// - `Ok(false)`: The setting was not found
     /// - `Err(_)`: An error occurred
     pub fn remove(&mut self, key: u16, index: Option<usize>) -> Result<bool, SettingsError> {
-        debug!("Removing key: {}, index: {:?}", key, index);
+        trace!("Removing key: {}, index: {:?}", key, index);
 
         let mut found = false;
         let mut buf = &mut self.buffer[..self.len];
@@ -434,7 +434,7 @@ where
                         self.changed_signal.signal(());
                     }
 
-                    debug!("Removed key: {}, index: {:?}", key, index);
+                    trace!("Removed key: {}, index: {:?}", key, index);
                     found = true;
 
                     current += 1;
@@ -448,7 +448,7 @@ where
         }
 
         if !found {
-            debug!("Key not found: {}, index: {:?}", key, index);
+            trace!("Key not found: {}, index: {:?}", key, index);
         }
 
         Ok(found)
