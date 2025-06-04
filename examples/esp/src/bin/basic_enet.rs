@@ -57,6 +57,8 @@ const THREAD_DATASET: &str = if let Some(dataset) = option_env!("THREAD_DATASET"
     "0e080000000000010000000300000b35060004001fffe002083a90e3a319a904940708fd1fa298dbd1e3290510fe0458f7db96354eaa6041b880ea9c0f030f4f70656e5468726561642d35386431010258d10410888f813c61972446ab616ee3c556a5910c0402a0f7f8"
 };
 
+esp_bootloader_esp_idf::esp_app_desc!();
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     esp_println::logger::init_logger_from_env();
@@ -103,7 +105,7 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(run_enet(enet_runner)).unwrap();
 
-    info!("Dataset: {}", THREAD_DATASET);
+    info!("Dataset: {THREAD_DATASET}");
 
     ot.set_active_dataset_tlv_hexstr(THREAD_DATASET).unwrap();
     ot.enable_ipv6(true).unwrap();
@@ -123,7 +125,7 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
         if !addrs.is_empty() {
-            info!("Got IPv6 address(es) from OpenThread: {:?}", addrs);
+            info!("Got IPv6 address(es) from OpenThread: {addrs:?}");
 
             // NOTE: Ideally, we should track any changes to the OpenThread Ipv6 conf with `ot_controller.wait_changed()`
             // and re-initialize the embassy-net config with the new Ip and prefix.
@@ -132,7 +134,7 @@ async fn main(spawner: Spawner) {
                 .find(|(addr, _)| addr.is_unicast_link_local())
                 .expect("No link-local address found");
 
-            info!("Will bind to link-local {} Ipv6 addr", linklocal_addr);
+            info!("Will bind to link-local {linklocal_addr} Ipv6 addr");
 
             stack.set_config_v6(ConfigV6::Static(StaticConfigV6 {
                 address: Ipv6Cidr::new(*linklocal_addr, *linklocal_prefix),
@@ -152,10 +154,7 @@ async fn main(spawner: Spawner) {
 
     socket.bind(BOUND_PORT).unwrap();
 
-    info!(
-        "Opened socket on port {} and waiting for packets...",
-        BOUND_PORT
-    );
+    info!("Opened socket on port {BOUND_PORT} and waiting for packets...");
 
     let buf: &mut [u8] = unsafe { mk_static!([u8; IPV6_PACKET_SIZE]).assume_init_mut() };
 

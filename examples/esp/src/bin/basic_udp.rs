@@ -52,6 +52,8 @@ const THREAD_DATASET: &str = if let Some(dataset) = option_env!("THREAD_DATASET"
     "0e080000000000010000000300000b35060004001fffe002083a90e3a319a904940708fd1fa298dbd1e3290510fe0458f7db96354eaa6041b880ea9c0f030f4f70656e5468726561642d35386431010258d10410888f813c61972446ab616ee3c556a5910c0402a0f7f8"
 };
 
+esp_bootloader_esp_idf::esp_app_desc!();
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     esp_println::logger::init_logger_from_env();
@@ -89,7 +91,7 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(run_ot_ip_info(ot.clone())).unwrap();
 
-    info!("Dataset: {}", THREAD_DATASET);
+    info!("Dataset: {THREAD_DATASET}");
 
     ot.set_active_dataset_tlv_hexstr(THREAD_DATASET).unwrap();
     ot.enable_ipv6(true).unwrap();
@@ -101,10 +103,7 @@ async fn main(spawner: Spawner) {
     )
     .unwrap();
 
-    info!(
-        "Opened socket on port {} and waiting for packets...",
-        BOUND_PORT
-    );
+    info!("Opened socket on port {BOUND_PORT} and waiting for packets...");
 
     let buf: &mut [u8] = unsafe { mk_static!([u8; UDP_SOCKETS_BUF]).assume_init_mut() };
 
@@ -139,7 +138,7 @@ async fn run_ot_ip_info(ot: OpenThread<'static>) -> ! {
         .unwrap();
 
         if cur_addrs != addrs {
-            info!("Got new IPv6 address(es) from OpenThread: {:?}", addrs);
+            info!("Got new IPv6 address(es) from OpenThread: {addrs:?}");
 
             cur_addrs = addrs;
 
