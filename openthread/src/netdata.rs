@@ -186,7 +186,7 @@ impl defmt::Format for OtBorderRouterConfig {
     }
 }
 
-impl<'a> OpenThread<'a> {
+impl OpenThread<'_> {
     /// Gets the list of all on mesh prefixes
     ///
     /// Arguments:

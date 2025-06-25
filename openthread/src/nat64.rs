@@ -36,7 +36,7 @@ impl defmt::Format for Nat64Error {
     }
 }
 
-impl<'a> OpenThread<'a> {
+impl OpenThread<'_> {
     /// Creates the IPv6 address by performing NAT64 address translation from the preferred NAT64 prefix and the given IPv4
     /// address as specified in RFC 6052.
     pub fn nat64_synthesize_ipv6(&self, ipv4: &Ipv4Addr) -> Result<Ipv6Addr, OtError> {

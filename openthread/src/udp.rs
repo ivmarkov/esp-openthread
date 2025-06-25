@@ -159,6 +159,8 @@ impl<'a> UdpSocket<'a> {
         let len = len.min(buf.len());
         buf[..len].copy_from_slice(&data[..len]);
 
+        trace!("Received UDP packet: {}", Bytes(&buf[..len]));
+
         Ok((len, local_addr, remote_addr))
     }
 
@@ -212,7 +214,7 @@ impl<'a> UdpSocket<'a> {
                 trace!("UDP message dropped");
             }
 
-            debug!("Transmitted UDP packet: {}", Bytes(data));
+            trace!("Transmitted UDP packet: {}", Bytes(data));
 
             Ok(())
         } else {
