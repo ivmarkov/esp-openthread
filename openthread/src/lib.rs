@@ -538,7 +538,7 @@ impl<'a> OpenThread<'a> {
             otMessageFree(msg);
         }
 
-        debug!("Received IPv6 packet: {}", Bytes(&buf[..len]));
+        trace!("Received IPv6 packet: {}", Bytes(&buf[..len]));
 
         Ok(len)
     }
@@ -548,7 +548,11 @@ impl<'a> OpenThread<'a> {
     /// Arguments:
     /// - `packet`: The packet to be transmitted.
     pub fn tx(&self, packet: &[u8]) -> Result<(), OtError> {
-        self.activate().tx_ip6(packet)
+        self.activate().tx_ip6(packet)?;
+
+        trace!("Transmitted IPv6 packet: {}", Bytes(packet));
+
+        Ok(())
     }
 
     /// Initialize the OpenThread state, by:
